@@ -3,9 +3,12 @@ import os
 import sys
 import subprocess
 import re
+import shlex
+import shutil
 import curses
 from pathlib import Path
 from datetime import datetime
+from getpass import getpass
 
 class SystemChecker:
     def __init__(self, min_disk_gb=30):
@@ -117,6 +120,379 @@ class SystemChecker:
             results.extend(self.format_result("warn", "Morpheus Tools", "Partial installation detected", "ls /opt/ && which morpheus-node-ctl"))
         
         return results
+
+
+def run_storage_command(command, display_command=None):
+    """Run storage command with echo and captured output."""
+    shown = display_command or command
+    print(f"$ {shown}")
+    try:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"Command error: {exc}")
+        return -1, "", str(exc)
+
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+
+    if stdout:
+        print(stdout)
+    else:
+        print()
+
+    if result.returncode != 0 and stderr:
+        print(stderr)
+
+    return result.returncode, stdout, stderr
+
+
+def pause():
+    """Pause until enter is pressed."""
+    try:
+        input("Press [enter] to continue...")
+    except EOFError:  # pragma: no cover - non-interactive safeguard
+        pass
+
+
+def ensure_root():
+    """Verify script is running as root for storage operations."""
+    if os.geteuid() != 0:
+        print("Storage Ops requires root privileges. Please rerun as root.")
+        pause()
+        return False
+    return True
+
+
+def _require_tool(tool):
+    """Check for a required binary."""
+    if shutil.which(tool):
+        return True
+    print(f"{tool} not installed")
+    pause()
+    return False
+
+
+def iscsi_menu():
+    """Interactive iSCSI operations."""
+    if not _require_tool("iscsiadm"):
+        return
+
+    while True:
+        print("\n=== iSCSI Tools ===")
+        print("1) Discover targets")
+        print("2) Add node")
+        print("3) Configure CHAP")
+        print("4) Login to node")
+        print("5) Logout of node")
+        print("6) List sessions")
+        print("7) List nodes")
+        print("8) Rescan SCSI hosts")
+        print("9) Multipath status")
+        print("b) Back")
+
+        choice = input("Select option: ").strip().lower()
+
+        if choice == "1":
+            portal = input("Portal (ip[:port]): ").strip()
+            if not portal:
+                print("Portal required.")
+                pause()
+                continue
+            run_storage_command(f"iscsiadm -m discovery -t sendtargets -p {shlex.quote(portal)}")
+            pause()
+        elif choice == "2":
+            portal = input("Portal (ip[:port]): ").strip()
+            iqn = input("Target IQN: ").strip()
+            if not portal or not iqn:
+                print("Portal and IQN required.")
+                pause()
+                continue
+            cmd = (
+                f"iscsiadm -m node -T {shlex.quote(iqn)} -p {shlex.quote(portal)} --op new"
+            )
+            run_storage_command(cmd)
+            pause()
+        elif choice == "3":
+            portal = input("Portal (ip[:port]): ").strip()
+            iqn = input("Target IQN: ").strip()
+            username = input("CHAP username: ").strip()
+            secret = getpass("CHAP secret: ").strip()
+            if not portal or not iqn or not username or not secret:
+                print("All CHAP fields are required.")
+                pause()
+                continue
+            base = f"iscsiadm -m node -T {shlex.quote(iqn)} -p {shlex.quote(portal)}"
+            run_storage_command(
+                f"{base} --op update -n node.session.auth.authmethod -v CHAP"
+            )
+            run_storage_command(
+                f"{base} --op update -n node.session.auth.username -v {shlex.quote(username)}"
+            )
+            pass_cmd = (
+                f"{base} --op update -n node.session.auth.password -v {shlex.quote(secret)}"
+            )
+            mask_cmd = (
+                f"{base} --op update -n node.session.auth.password -v ***"
+            )
+            run_storage_command(pass_cmd, mask_cmd)
+            pause()
+        elif choice == "4":
+            portal = input("Portal (ip[:port]): ").strip()
+            iqn = input("Target IQN: ").strip()
+            if not portal or not iqn:
+                print("Portal and IQN required.")
+                pause()
+                continue
+            run_storage_command(
+                f"iscsiadm -m node -T {shlex.quote(iqn)} -p {shlex.quote(portal)} --login"
+            )
+            pause()
+        elif choice == "5":
+            portal = input("Portal (ip[:port]): ").strip()
+            iqn = input("Target IQN: ").strip()
+            if not portal or not iqn:
+                print("Portal and IQN required.")
+                pause()
+                continue
+            run_storage_command(
+                f"iscsiadm -m node -T {shlex.quote(iqn)} -p {shlex.quote(portal)} --logout"
+            )
+            pause()
+        elif choice == "6":
+            run_storage_command("iscsiadm -m session")
+            pause()
+        elif choice == "7":
+            run_storage_command("iscsiadm -m node")
+            pause()
+        elif choice == "8":
+            cmd = (
+                "bash -c 'for host in /sys/class/scsi_host/host*; do echo "
+                "\"- - -\" > \"$host/scan\"; done; udevadm settle'"
+            )
+            run_storage_command(cmd)
+            pause()
+        elif choice == "9":
+            if _require_tool("multipath"):
+                run_storage_command("multipath -ll")
+                pause()
+            continue
+        elif choice == "b":
+            break
+        else:
+            print("Invalid selection.")
+            pause()
+
+
+def block_devices_menu():
+    """Read-only block device views."""
+    while True:
+        print("\n=== Block Devices ===")
+        print("1) lsblk overview")
+        print("2) multipath -ll")
+        print("3) /proc/partitions")
+        print("b) Back")
+
+        choice = input("Select option: ").strip().lower()
+
+        if choice == "1":
+            cols = "NAME,TYPE,SIZE,MODEL,HCTL,WWN,SERIAL,MOUNTPOINTS"
+            run_storage_command(f"lsblk -o {cols}")
+            pause()
+        elif choice == "2":
+            if _require_tool("multipath"):
+                run_storage_command("multipath -ll")
+                pause()
+            continue
+        elif choice == "3":
+            run_storage_command("cat /proc/partitions")
+            pause()
+        elif choice == "b":
+            break
+        else:
+            print("Invalid selection.")
+            pause()
+
+
+def _is_target_mounted(target):
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as mounts:
+            for line in mounts:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                if parts[0] == target or parts[1] == target:
+                    return True
+    except FileNotFoundError:  # pragma: no cover - defensive
+        pass
+    return False
+
+
+def _start_service_if_available(service):
+    if not shutil.which("systemctl"):
+        print("systemctl not installed")
+        return
+
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-unit-files", f"{service}.service", "--no-legend"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover
+        print(f"Unable to query {service}: {exc}")
+        return
+
+    if service not in result.stdout:
+        print(f"{service} not installed")
+        return
+
+    run_storage_command(f"systemctl start {service}")
+    run_storage_command(f"systemctl is-active {service}")
+
+
+def gfs2_menu():
+    """Interactive GFS2 operations."""
+    while True:
+        print("\n=== GFS2 Tools ===")
+        print("1) List GFS2 mounts")
+        print("2) Probe device with blkid")
+        print("3) Start corosync/dlm")
+        print("4) Check quorum")
+        print("5) Mount GFS2 (clustered)")
+        print("6) Mount GFS2 (single-node)")
+        print("7) Unmount GFS2")
+        print("8) Grow GFS2 filesystem")
+        print("9) Offline gfs2_fsck")
+        print("b) Back")
+
+        choice = input("Select option: ").strip().lower()
+
+        if choice == "1":
+            rc, out, _ = run_storage_command("mount | grep ' type gfs2 ' || true")
+            if not out.strip():
+                print("No GFS2 mounts found.")
+            pause()
+        elif choice == "2":
+            device = input("Device (e.g., /dev/mapper/mpatha): ").strip()
+            if not device:
+                print("Device required.")
+                pause()
+                continue
+            run_storage_command(f"blkid {shlex.quote(device)}")
+            pause()
+        elif choice == "3":
+            print("Attempting to start corosync and dlm (if installed)...")
+            _start_service_if_available("corosync")
+            _start_service_if_available("dlm")
+            pause()
+        elif choice == "4":
+            if shutil.which("corosync-quorumtool"):
+                run_storage_command("corosync-quorumtool -s")
+            else:
+                print("corosync-quorumtool not installed")
+            pause()
+        elif choice == "5":
+            print("Ensure quorum and dlm are healthy before mounting clustered GFS2.")
+            device = input("Device (e.g., /dev/mapper/mpatha): ").strip()
+            mountpoint = input("Mountpoint (e.g., /mnt/gfs2): ").strip()
+            locktable = input("locktable (clustername:fsname): ").strip()
+            extra = input("Extra mount options (optional, comma-separated): ").strip()
+            if not device or not mountpoint or not locktable:
+                print("Device, mountpoint, and locktable required.")
+                pause()
+                continue
+            Path(mountpoint).mkdir(parents=True, exist_ok=True)
+            opts = f"locktable={locktable}"
+            if extra:
+                opts = f"{opts},{extra}"
+            cmd = (
+                f"mount -t gfs2 -o {shlex.quote(opts)} {shlex.quote(device)} {shlex.quote(mountpoint)}"
+            )
+            run_storage_command(cmd)
+            pause()
+        elif choice == "6":
+            print("Use only on one node at a time for single-node mounts.")
+            device = input("Device (e.g., /dev/mapper/mpatha): ").strip()
+            mountpoint = input("Mountpoint (e.g., /mnt/gfs2): ").strip()
+            extra = input("Extra mount options (optional, comma-separated): ").strip()
+            if not device or not mountpoint:
+                print("Device and mountpoint required.")
+                pause()
+                continue
+            Path(mountpoint).mkdir(parents=True, exist_ok=True)
+            opts = "lockproto=lock_nolock"
+            if extra:
+                opts = f"{opts},{extra}"
+            cmd = (
+                f"mount -t gfs2 -o {shlex.quote(opts)} {shlex.quote(device)} {shlex.quote(mountpoint)}"
+            )
+            run_storage_command(cmd)
+            pause()
+        elif choice == "7":
+            target = input("Mountpoint or device to unmount: ").strip()
+            if not target:
+                print("Target required.")
+                pause()
+                continue
+            run_storage_command(f"umount {shlex.quote(target)}")
+            pause()
+        elif choice == "8":
+            if not _require_tool("gfs2_grow"):
+                continue
+            mountpoint = input("Mountpoint (currently mounted GFS2): ").strip()
+            if not mountpoint:
+                print("Mountpoint required.")
+                pause()
+                continue
+            run_storage_command(f"gfs2_grow {shlex.quote(mountpoint)}")
+            pause()
+        elif choice == "9":
+            if not _require_tool("gfs2_fsck"):
+                continue
+            device = input("Device (e.g., /dev/mapper/mpatha): ").strip()
+            if not device:
+                print("Device required.")
+                pause()
+                continue
+            if _is_target_mounted(device):
+                print("Device is currently mounted. Unmount before running gfs2_fsck.")
+                pause()
+                continue
+            run_storage_command(f"gfs2_fsck {shlex.quote(device)}")
+            pause()
+        elif choice == "b":
+            break
+        else:
+            print("Invalid selection.")
+            pause()
+
+
+def storage_ops_console():
+    """Top-level storage operations console."""
+    if not ensure_root():
+        return
+
+    while True:
+        print("\n=== Storage Ops ===")
+        print("1) iSCSI tools")
+        print("2) Block device views")
+        print("3) GFS2 tools")
+        print("q) Quit")
+
+        choice = input("Select option: ").strip().lower()
+
+        if choice == "1":
+            iscsi_menu()
+        elif choice == "2":
+            block_devices_menu()
+        elif choice == "3":
+            gfs2_menu()
+        elif choice in {"q", "quit"}:
+            break
+        else:
+            print("Invalid selection.")
+            pause()
     
     def check_storage_info(self):
         """Storage and disk checks"""
@@ -691,6 +1067,7 @@ def main_menu(stdscr):
         ("iSCSI Status", "Sessions, targets, multipath, HPE Alletra"),
         ("Network Config", "Netplan vs NetworkManager, connectivity, DNS"),
         ("Virtual Machines", "Local VMs, VME Manager detection"),
+        ("Storage Ops", "Interactive iSCSI and GFS2 console"),
         ("", ""),  # separator
         ("Report", "Generate complete system report to file"),
         ("", ""),  # separator
@@ -798,6 +1175,16 @@ def main_menu(stdscr):
             elif selected == "Virtual Machines":
                 results = checker.check_vm_info()
                 show_results(stdscr, "<VIRTUAL MACHINES>", results)
+            elif selected == "Storage Ops":
+                curses.def_prog_mode()
+                curses.endwin()
+                try:
+                    storage_ops_console()
+                finally:
+                    curses.reset_prog_mode()
+                    curses.curs_set(0)
+                    stdscr.clear()
+                    stdscr.refresh()
             elif selected == "Report":
                 generate_report(stdscr, checker)
 
