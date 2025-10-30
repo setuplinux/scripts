@@ -137,10 +137,8 @@ if ! install -m 0755 "$TMP/$BIN" "$DEST/$BIN"; then
 fi
 
 echo "[+] installed: $DEST/$BIN"
-if "$DEST/$BIN" --version >/dev/null 2>&1; then
-  "$DEST/$BIN" --version
-else
-  echo "[*] installed binary does not support --version" >&2
+if ! "$DEST/$BIN" version; then
+  "$DEST/$BIN" --help || true
 fi
 
 cat <<'EOS'
