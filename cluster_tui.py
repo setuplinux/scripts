@@ -53,6 +53,11 @@ if not logger.handlers:
     logger.propagate = False
 
 
+def log_check_status(host: str, check_name: str, status: str, summary: str) -> None:
+    """Write a structured log entry for every check outcome (including skipped/passive ones)."""
+    logger.info("Check %s for %s -> %s | %s", check_name, host, status, summary)
+
+
 CHECK_NAMES = ["SSH", "iSCSI", "GFS2", "Corosync", "Pacemaker"]
 HOST_REPAIR_STEPS: List[Tuple[str, str]] = [
     ("Restart iSCSI daemon", "systemctl restart iscsid"),
@@ -215,6 +220,7 @@ class HostStatus:
         check.status = status
         check.summary = summary
         check.output = output.strip()
+        log_check_status(self.host, check_name, status, summary)
 
     def add_repair_entry(self, summary: str, output: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -386,6 +392,7 @@ def check_pacemaker(host: str, host_target: str) -> CheckResult:
 def perform_host_checks(host: str, target: Optional[str] = None) -> HostStatus:
     """Run the health check chain for HOST and return a populated HostStatus."""
     resolved_target = target or get_host_target(host)
+    logger.info("Starting health checks for %s (%s)", host, resolved_target)
     status = HostStatus(host=host, checks=create_default_checks(), last_run_time=datetime.now())
 
     ssh_result = check_ssh(host, resolved_target)
@@ -425,11 +432,13 @@ def perform_host_checks(host: str, target: Optional[str] = None) -> HostStatus:
         pacemaker_result.output,
     )
 
+    logger.info("Completed health checks for %s with overall %s", host, status.overall_status())
     return status
 
 
 def repair_host_and_check(host: str) -> HostStatus:
     target = get_host_target(host)
+    logger.info("Starting repair workflow for %s (%s)", host, target)
     host_success, host_details = run_step_sequence(target, HOST_REPAIR_STEPS, timeout=60)
     host_summary = "Host level repair completed" if host_success else "Host level repair finished with errors"
 
@@ -452,6 +461,7 @@ def repair_host_and_check(host: str) -> HostStatus:
 
     status = perform_host_checks(host, target)
     status.add_repair_entry(combined_summary, combined_details)
+    logger.info("Repair workflow for %s finished with %s", host, status.overall_status())
     return status
 
 
@@ -777,18 +787,22 @@ class ClusterUI:
                 status = self.host_statuses[name].overall_status()
                 lines.append(f" - {name}: {status}")
             warnings = self._storage_quorum_warnings()
-            if not self._hosts_needing_repair():
-                lines.append("")
-                if warnings:
-                    lines.append("All hosts report OK, but storage quorum warnings are present (see below).")
-                else:
-                    lines.append("All hosts appear healthy.")
-            else:
-                lines.append("")
-                lines.append("Some hosts need repair. Use the Repair All entry or fix individually.")
+        if not self._hosts_needing_repair():
+            lines.append("")
             if warnings:
-                lines.append("")
-                lines.extend(warnings)
+                lines.append("All hosts report OK, but storage quorum warnings are present (see below).")
+            else:
+                lines.append("All hosts appear healthy.")
+        else:
+            lines.append("")
+            lines.append("Some hosts need repair. Use the Repair All entry or fix individually.")
+        if warnings:
+            lines.append("")
+            lines.extend(warnings)
+        pcs_lines = self._pcs_recovery_lines(usable_width)
+        if pcs_lines:
+            lines.append("")
+            lines.extend(pcs_lines)
         lines.append("")
         lines.extend(["Recent messages:"] + (list(self.messages)[-3:] or ["(no recent messages)"]))
         for idx in range(min(len(lines), height)):
@@ -988,6 +1002,8 @@ class ClusterUI:
         notes = spec.get("notes")
         if notes:
             lines.extend(textwrap.wrap(f"Notes: {notes.format(**context)}", width))
+        if key in {"repair_host", "repair_all"}:
+            lines.extend(self._pcs_recovery_note_lines(width))
         return lines
 
     def _tutorial_line_attr(self, text: str) -> int:
@@ -1004,6 +1020,20 @@ class ClusterUI:
         if text.startswith("  "):
             return curses.A_DIM
         return attr
+
+    def _pcs_recovery_note_lines(self, width: int) -> List[str]:
+        lines: List[str] = ["PCS recovery logic steps:"]
+        for description, _ in CONTROLLER_NODE_REPAIR_STEPS:
+            wrapped = textwrap.wrap(f"  - {description}", width)
+            lines.extend(wrapped or [f"  - {description}"])
+        cluster_header = "Cluster-wide cleanup after Repairs:"
+        lines.extend(textwrap.wrap(cluster_header, width) or [cluster_header])
+        for description, _ in CONTROLLER_REPAIR_STEPS:
+            wrapped = textwrap.wrap(f"  - {description}", width)
+            lines.extend(wrapped or [f"  - {description}"])
+        gfs_line = "  - Re-enable and cleanup GFS2 clone resources, then rerun pcs status."
+        lines.extend(textwrap.wrap(gfs_line, width) or [gfs_line])
+        return lines
 
     # ------------------------------------------------------------ key input ---
     def handle_key(self, key: int) -> None:
@@ -1306,6 +1336,43 @@ class ClusterUI:
             warnings.append(f"Storage WARNING: No healthy iSCSI session detected on: {hostlist}")
 
         return warnings
+
+    def _pcs_issue_hosts(self) -> List[str]:
+        failures: List[str] = []
+        for name, _ in CLUSTER_HOSTS:
+            status = self.host_statuses.get(name)
+            if not status:
+                continue
+            try:
+                pacemaker = status.get_check("Pacemaker")
+            except KeyError:
+                continue
+            if pacemaker.status != "OK":
+                failures.append(name)
+        return failures
+
+    def _pcs_recovery_lines(self, width: int) -> List[str]:
+        if not CLUSTER_HOSTS:
+            return []
+        lines: List[str] = []
+        failing = self._pcs_issue_hosts()
+        if failing:
+            text = f"PCS status issues detected on: {', '.join(failing)}"
+        else:
+            text = "PCS status currently OK across all hosts."
+        lines.extend(textwrap.wrap(text, width) or [text])
+        lines.append("PCS recovery logic:")
+        host_intro = "Per-host repair also runs these controller steps when Pacemaker reports trouble:"
+        lines.extend(textwrap.wrap(host_intro, width))
+        for description, _ in CONTROLLER_NODE_REPAIR_STEPS:
+            lines.append(f"  - {description}")
+        cluster_intro = "Repair All finishes by applying cluster-wide cleanup:"
+        lines.extend(textwrap.wrap(cluster_intro, width))
+        for description, _ in CONTROLLER_REPAIR_STEPS:
+            lines.append(f"  - {description}")
+        lines.append("  - Re-enable/cleanup any detected GFS2 clone resources.")
+        lines.append("  - Verify Corosync and Pacemaker via pcs status.")
+        return lines
 
     def _order_hosts_for_repair(self, hosts: List[str]) -> List[str]:
         def priority(host: str) -> Tuple[int, int]:
