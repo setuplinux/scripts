@@ -6,7 +6,9 @@ from __future__ import annotations
 import curses
 import logging
 import queue
+import shlex
 import subprocess
+import sys
 import textwrap
 import threading
 from collections import deque
@@ -15,12 +17,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
-# -----------------------------------------------------------------------------
-# User configuration: place hostnames or IPs for the cluster here only.
-CLUSTER_HOSTS = ["e1", "e2", "e3"]
-# -----------------------------------------------------------------------------
+# -------------------------------------------------------------------------
+# SSH configuration
+SSH_USER = "root"
+SSH_PASSWORD = ""  # leave empty for key auth; if non-empty, use sshpass
+# -------------------------------------------------------------------------
+
+DEFAULT_HOSTS: List[Tuple[str, str]] = [
+    # ("e1", "10.10.10.5"),
+    # ("e2", "10.10.10.6"),
+    # ("e3", "10.10.10.7"),
+]
+
+# CLUSTER_HOSTS populated at runtime
+CLUSTER_HOSTS: List[Tuple[str, str]] = []
+HOST_TARGETS: Dict[str, str] = {}
 
 MENU_COLOR_PAIR = 5
+TITLE_COLOR_PAIR = 6
+MIN_GFS_NODES = 3
+
+APP_VERSION = "v2025.02.17"
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_NAME = SCRIPT_PATH.stem
@@ -67,7 +84,103 @@ CONTROLLER_REPAIR_STEPS: List[Tuple[str, str]] = [
     ("Cleanup failed resources", "pcs resource cleanup"),
 ]
 
-Action = Tuple[str, bool, Optional[Callable[[], None]]]
+Action = Tuple[str, bool, Optional[Callable[[], None]], Optional[str]]
+SSH_COMMON_FLAGS = [
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
+]
+
+
+def quote_for_shell(command: str) -> str:
+    """Return COMMAND quoted for safe copy/paste usage."""
+    if not command:
+        return "''"
+    if "'" not in command:
+        return f"'{command}'"
+    if '"' not in command:
+        return f'"{command}"'
+    return shlex.quote(command)
+
+
+def tutorial_ssh_line(target: str, command: str) -> str:
+    """Format the SSH invocation shown in the tutorial panel."""
+    return f"ssh {target} {quote_for_shell(command)}"
+
+
+TUTORIAL_CONTENT: Dict[str, Dict[str, str]] = {
+    "check_host": {
+        "title": "Check selected host",
+        "reason": "Run SSH, storage, and cluster verifications before touching {host}.",
+        "notes": "Outputs are saved to {log_file} for later review.",
+    },
+    "check_all": {
+        "title": "Run Check All",
+        "reason": "Baseline every configured host to understand overall blast radius.",
+        "notes": "Useful before/after big maintenance windows.",
+    },
+    "repair_host": {
+        "title": "Repair selected host",
+        "reason": "Rebuild storage paths on {host}, clear fencing, and restart cluster services.",
+        "notes": "Finishes by re-running the health checks above.",
+    },
+    "repair_all": {
+        "title": "Repair all hosts",
+        "reason": "Queue repairs in priority order, then restart cluster-wide services and GFS resources.",
+        "notes": "Use after confirming at least {min_nodes} healthy GFS nodes.",
+    },
+}
+
+def build_ssh_target(host: str) -> str:
+    """
+    Convert a raw host identifier into a user@host target.
+    If the input already contains '@', return it unchanged.
+    Otherwise prepend SSH_USER.
+    """
+    host = host.strip()
+    if "@" in host:
+        return host
+    return f"{SSH_USER}@{host}"
+
+
+def parse_cli_hosts(argv: List[str]) -> List[Tuple[str, str]]:
+    hosts: List[Tuple[str, str]] = []
+    for arg in argv:
+        arg = arg.strip()
+        if not arg:
+            continue
+        if "," in arg:
+            name, addr = arg.split(",", 1)
+            hosts.append((name.strip(), addr.strip()))
+        else:
+            if "@" in arg:
+                name = arg
+                addr = arg
+            else:
+                name = arg
+                addr = arg
+            hosts.append((name, addr))
+    return hosts
+
+
+def get_host_target(name: str) -> str:
+    return HOST_TARGETS.get(name, name)
+
+
+def host_index(name: str) -> int:
+    for idx, (candidate, _) in enumerate(CLUSTER_HOSTS):
+        if candidate == name:
+            return idx
+    return -1
+
+
+def get_primary_controller(default_name: str, default_target: str) -> Tuple[str, str]:
+    if CLUSTER_HOSTS:
+        return CLUSTER_HOSTS[0]
+    return default_name, default_target
 
 
 @dataclass
@@ -134,7 +247,7 @@ def create_default_checks() -> List[CheckResult]:
 
 def format_remote_output(host: str, command: str, exit_code: int, stdout: str, stderr: str) -> str:
     parts = [
-        f"$ ssh root@{host} \"{command}\"",
+        f"$ ssh {build_ssh_target(host)} \"{command}\"",
         f"exit code: {exit_code}",
     ]
     if stdout:
@@ -151,7 +264,12 @@ def log_remote_result(host: str, command: str, exit_code: int, stdout: str, stde
 
 def run_remote_command(host: str, command: str, timeout: int = 10) -> Tuple[int, str, str]:
     """Execute COMMAND on HOST through the local ssh client."""
-    full_command = ["ssh", f"root@{host}", command]
+    ssh_target = build_ssh_target(host)
+    if SSH_PASSWORD:
+        base_cmd = ["sshpass", "-p", SSH_PASSWORD, "ssh"]
+    else:
+        base_cmd = ["ssh"]
+    full_command = base_cmd + SSH_COMMON_FLAGS + [ssh_target, command]
     try:
         completed = subprocess.run(
             full_command,
@@ -167,6 +285,12 @@ def run_remote_command(host: str, command: str, timeout: int = 10) -> Tuple[int,
         stderr = (exc.stderr or "") + f"\nCommand timed out after {timeout} seconds."
         log_remote_result(host, command, 124, stdout, stderr)
         return 124, stdout, stderr
+    except FileNotFoundError as exc:
+        stderr = f"{exc.filename} was not found."
+        if SSH_PASSWORD and exc.filename == "sshpass":
+            stderr = "sshpass is required when SSH_PASSWORD is set but was not found."
+        log_remote_result(host, command, 1, "", stderr)
+        return 1, "", stderr
     except Exception as exc:  # pragma: no cover - defensive
         stderr = f"{type(exc).__name__}: {exc}"
         log_remote_result(host, command, 255, "", stderr)
@@ -177,29 +301,29 @@ def joined_outputs(outputs: Iterable[str]) -> str:
     return "\n\n".join(part for part in outputs if part).strip()
 
 
-def run_step_sequence(target_host: str, steps: List[Tuple[str, str]], *, timeout: int) -> Tuple[bool, str]:
-    """Run STEPS on TARGET_HOST, returning success flag and combined log output."""
+def run_step_sequence(remote_target: str, steps: List[Tuple[str, str]], *, timeout: int) -> Tuple[bool, str]:
+    """Run STEPS on REMOTE_TARGET, returning success flag and combined log output."""
     outputs: List[str] = []
     success = True
     for description, command in steps:
-        exit_code, stdout, stderr = run_remote_command(target_host, command, timeout=timeout)
+        exit_code, stdout, stderr = run_remote_command(remote_target, command, timeout=timeout)
         outputs.append(
-            f"{description}:\n" + format_remote_output(target_host, command, exit_code, stdout, stderr)
+            f"{description}:\n" + format_remote_output(remote_target, command, exit_code, stdout, stderr)
         )
         if exit_code != 0:
             success = False
     return success, "\n\n".join(outputs).strip()
 
 
-def check_ssh(host: str) -> CheckResult:
-    exit_code, stdout, stderr = run_remote_command(host, "echo ok")
-    output = format_remote_output(host, "echo ok", exit_code, stdout, stderr)
+def check_ssh(host: str, target: str) -> CheckResult:
+    exit_code, stdout, stderr = run_remote_command(target, "echo ok")
+    output = format_remote_output(target, "echo ok", exit_code, stdout, stderr)
     summary = "SSH connectivity verified" if exit_code == 0 else "SSH command failed"
     status = "OK" if exit_code == 0 else "FAIL"
     return CheckResult(name="SSH", status=status, summary=summary, output=output)
 
 
-def check_iscsi(host: str) -> CheckResult:
+def check_iscsi(host: str, target: str) -> CheckResult:
     commands = [
         "iscsiadm -m session",
         "multipath -ll",
@@ -208,8 +332,8 @@ def check_iscsi(host: str) -> CheckResult:
     failed_detail = ""
     success = True
     for command in commands:
-        exit_code, stdout, stderr = run_remote_command(host, command)
-        outputs.append(format_remote_output(host, command, exit_code, stdout, stderr))
+        exit_code, stdout, stderr = run_remote_command(target, command)
+        outputs.append(format_remote_output(target, command, exit_code, stdout, stderr))
         if exit_code != 0:
             success = False
             failed_detail = f"{command} (rc={exit_code})"
@@ -223,44 +347,48 @@ def check_iscsi(host: str) -> CheckResult:
     )
 
 
-def check_gfs2(host: str) -> CheckResult:
+def check_gfs2(host: str, target: str) -> CheckResult:
     command = "mount | grep gfs2"
-    exit_code, stdout, stderr = run_remote_command(host, command)
-    output = format_remote_output(host, command, exit_code, stdout, stderr)
+    exit_code, stdout, stderr = run_remote_command(target, command)
+    output = format_remote_output(target, command, exit_code, stdout, stderr)
     status = "OK" if exit_code == 0 else "FAIL"
     summary = "GFS2 mounts detected" if status == "OK" else "No active GFS2 mount found"
     return CheckResult(name="GFS2", status=status, summary=summary, output=output)
 
 
-def check_corosync(host: str) -> CheckResult:
+def check_corosync(host: str, target: str) -> CheckResult:
     command = "systemctl is-active corosync"
-    exit_code, stdout, stderr = run_remote_command(host, command)
-    output = format_remote_output(host, command, exit_code, stdout, stderr)
+    exit_code, stdout, stderr = run_remote_command(target, command)
+    output = format_remote_output(target, command, exit_code, stdout, stderr)
     active = stdout.strip() == "active" and exit_code == 0
     status = "OK" if active else "FAIL"
     summary = "Corosync is active" if active else "Corosync is not active"
     return CheckResult(name="Corosync", status=status, summary=summary, output=output)
 
 
-def check_pacemaker(host: str) -> CheckResult:
-    controlling_host = CLUSTER_HOSTS[0] if CLUSTER_HOSTS else host
+def check_pacemaker(host: str, host_target: str) -> CheckResult:
+    if CLUSTER_HOSTS:
+        controlling_name, controlling_target = CLUSTER_HOSTS[0]
+    else:
+        controlling_name, controlling_target = host, host_target
     command = "pcs status"
-    exit_code, stdout, stderr = run_remote_command(controlling_host, command)
-    output = format_remote_output(controlling_host, command, exit_code, stdout, stderr)
+    exit_code, stdout, stderr = run_remote_command(controlling_target, command)
+    output = format_remote_output(controlling_target, command, exit_code, stdout, stderr)
     status = "OK" if exit_code == 0 else "FAIL"
     summary = (
-        f"pcs status reported OK via {controlling_host}"
+        f"pcs status reported OK via {controlling_name}"
         if status == "OK"
-        else f"pcs status failed via {controlling_host}"
+        else f"pcs status failed via {controlling_name}"
     )
     return CheckResult(name="Pacemaker", status=status, summary=summary, output=output)
 
 
-def perform_host_checks(host: str) -> HostStatus:
+def perform_host_checks(host: str, target: Optional[str] = None) -> HostStatus:
     """Run the health check chain for HOST and return a populated HostStatus."""
+    resolved_target = target or get_host_target(host)
     status = HostStatus(host=host, checks=create_default_checks(), last_run_time=datetime.now())
 
-    ssh_result = check_ssh(host)
+    ssh_result = check_ssh(host, resolved_target)
     status.set_check("SSH", ssh_result.status, ssh_result.summary, ssh_result.output)
     if ssh_result.status != "OK":
         for later in ("iSCSI", "GFS2", "Corosync", "Pacemaker"):
@@ -272,16 +400,16 @@ def perform_host_checks(host: str) -> HostStatus:
             )
         return status
 
-    iscsi_result = check_iscsi(host)
+    iscsi_result = check_iscsi(host, resolved_target)
     status.set_check("iSCSI", iscsi_result.status, iscsi_result.summary, iscsi_result.output)
 
     if iscsi_result.status == "FAIL":
         status.set_check("GFS2", "SKIPPED", "Skipped because storage is unhealthy", "")
     else:
-        gfs2_result = check_gfs2(host)
+        gfs2_result = check_gfs2(host, resolved_target)
         status.set_check("GFS2", gfs2_result.status, gfs2_result.summary, gfs2_result.output)
 
-    corosync_result = check_corosync(host)
+    corosync_result = check_corosync(host, resolved_target)
     status.set_check(
         "Corosync",
         corosync_result.status,
@@ -289,7 +417,7 @@ def perform_host_checks(host: str) -> HostStatus:
         corosync_result.output,
     )
 
-    pacemaker_result = check_pacemaker(host)
+    pacemaker_result = check_pacemaker(host, resolved_target)
     status.set_check(
         "Pacemaker",
         pacemaker_result.status,
@@ -301,7 +429,8 @@ def perform_host_checks(host: str) -> HostStatus:
 
 
 def repair_host_and_check(host: str) -> HostStatus:
-    host_success, host_details = run_step_sequence(host, HOST_REPAIR_STEPS, timeout=60)
+    target = get_host_target(host)
+    host_success, host_details = run_step_sequence(target, HOST_REPAIR_STEPS, timeout=60)
     host_summary = "Host level repair completed" if host_success else "Host level repair finished with errors"
 
     controller_success, controller_details = run_controller_node_repairs(host)
@@ -321,22 +450,23 @@ def repair_host_and_check(host: str) -> HostStatus:
     combined_details = "\n\n".join(part for part in (host_details, controller_details, service_details) if part).strip()
     combined_summary = f"{host_summary}; {controller_summary}; {service_summary}"
 
-    status = perform_host_checks(host)
+    status = perform_host_checks(host, target)
     status.add_repair_entry(combined_summary, combined_details)
     return status
 
 
 def run_controller_node_repairs(host: str) -> Tuple[bool, str]:
-    controller_host = CLUSTER_HOSTS[0] if CLUSTER_HOSTS else host
+    fallback_target = get_host_target(host)
+    _, controller_target = get_primary_controller(host, fallback_target)
     steps = [
         (description.format(host=host), command.format(host=host))
         for description, command in CONTROLLER_NODE_REPAIR_STEPS
     ]
-    return run_step_sequence(controller_host, steps, timeout=90)
+    return run_step_sequence(controller_target, steps, timeout=90)
 
 
-def detect_gfs2_clone_resources(controller_host: str) -> List[str]:
-    exit_code, stdout, stderr = run_remote_command(controller_host, "pcs status", timeout=60)
+def detect_gfs2_clone_resources(controller_target: str) -> List[str]:
+    exit_code, stdout, stderr = run_remote_command(controller_target, "pcs status", timeout=60)
     # run_remote_command already logs details; proceed even if pcs status fails.
     if exit_code != 0:
         return []
@@ -361,8 +491,8 @@ def detect_gfs2_clone_resources(controller_host: str) -> List[str]:
     return clones
 
 
-def repair_gfs2_resources(controller_host: str) -> Tuple[bool, str]:
-    clone_resources = detect_gfs2_clone_resources(controller_host)
+def repair_gfs2_resources(controller_target: str) -> Tuple[bool, str]:
+    clone_resources = detect_gfs2_clone_resources(controller_target)
     if not clone_resources:
         return True, "No GFS2 clone resources detected via pcs status"
 
@@ -371,17 +501,17 @@ def repair_gfs2_resources(controller_host: str) -> Tuple[bool, str]:
         steps.append((f"Enable GFS2 clone {clone}", f"pcs resource enable {clone}"))
         steps.append((f"Cleanup GFS2 clone {clone}", f"pcs resource cleanup {clone}"))
 
-    success, step_details = run_step_sequence(controller_host, steps, timeout=90)
+    success, step_details = run_step_sequence(controller_target, steps, timeout=90)
     header = f"Detected GFS2 clone resources: {', '.join(clone_resources)}"
     combined_details = "\n\n".join(part for part in (header, step_details) if part).strip()
     return success, combined_details
 
 
-def run_cluster_level_repairs(controller_host: str) -> Tuple[str, str]:
+def run_cluster_level_repairs(controller_target: str) -> Tuple[str, str]:
     controller_success, controller_details = run_step_sequence(
-        controller_host, CONTROLLER_REPAIR_STEPS, timeout=90
+        controller_target, CONTROLLER_REPAIR_STEPS, timeout=90
     )
-    gfs_success, gfs_details = repair_gfs2_resources(controller_host)
+    gfs_success, gfs_details = repair_gfs2_resources(controller_target)
 
     summary_parts = [
         "Cluster level repair completed" if controller_success else "Cluster level repair reported errors",
@@ -392,8 +522,9 @@ def run_cluster_level_repairs(controller_host: str) -> Tuple[str, str]:
 
 
 def verify_cluster_services(host: str) -> Tuple[bool, str]:
-    corosync_result = check_corosync(host)
-    pacemaker_result = check_pacemaker(host)
+    target = get_host_target(host)
+    corosync_result = check_corosync(host, target)
+    pacemaker_result = check_pacemaker(host, target)
     lines = [
         f"Corosync verification: {corosync_result.summary} (status={corosync_result.status})",
         corosync_result.output,
@@ -412,8 +543,8 @@ class ClusterUI:
     def __init__(self, stdscr: Any) -> None:
         self.stdscr = stdscr
         self.host_statuses: Dict[str, HostStatus] = {
-            host: HostStatus(host=host, checks=create_default_checks())
-            for host in CLUSTER_HOSTS
+            name: HostStatus(host=name, checks=create_default_checks())
+            for name, _ in CLUSTER_HOSTS
         }
         self.queue: queue.Queue[Tuple[str, object]] = queue.Queue()
         self.messages: Deque[str] = deque(maxlen=5)
@@ -439,6 +570,7 @@ class ClusterUI:
             curses.init_pair(3, curses.COLOR_YELLOW, -1)
             curses.init_pair(4, curses.COLOR_CYAN, -1)
             curses.init_pair(MENU_COLOR_PAIR, curses.COLOR_MAGENTA, -1)
+            curses.init_pair(TITLE_COLOR_PAIR, curses.COLOR_WHITE, curses.COLOR_BLUE)
 
     def run(self) -> None:
         while self.running:
@@ -456,13 +588,30 @@ class ClusterUI:
             self.stdscr.addstr(0, 0, "Terminal window is too small.")
             self.stdscr.refresh()
             return
+        title_height = self.draw_title_bar(width)
+        remaining_height = max(0, height - title_height)
+        if remaining_height <= 0:
+            self.stdscr.refresh()
+            return
         host_panel_width = min(max(24, width // 3), width - 24)
-        self.draw_host_panel(0, 0, height, host_panel_width)
-        self.draw_vertical_line(0, host_panel_width, height)
+        start_y = title_height
+        self.draw_host_panel(start_y, 0, remaining_height, host_panel_width)
+        self.draw_vertical_line(start_y, host_panel_width, remaining_height)
         detail_start_x = host_panel_width + 1
         detail_width = max(1, width - detail_start_x)
-        self.draw_detail_panel(0, detail_start_x, detail_width, height)
+        self.draw_detail_panel(start_y, detail_start_x, detail_width, remaining_height)
         self.stdscr.refresh()
+
+    def draw_title_bar(self, width: int) -> int:
+        title = f"Cluster TUI {APP_VERSION} | Log: {LOG_FILE_DISPLAY}"
+        attr = curses.A_BOLD
+        if curses.has_colors():
+            attr |= curses.color_pair(TITLE_COLOR_PAIR)
+        padded = title[:width].ljust(width)
+        self.safe_addstr(0, 0, padded, attr)
+        spacer = " " * max(0, width)
+        self.safe_addstr(1, 0, spacer[:width])
+        return 2
 
     def draw_host_panel(self, start_y: int, start_x: int, height: int, width: int) -> None:
         if height <= 2 or width <= 4:
@@ -526,11 +675,18 @@ class ClusterUI:
         # Draw actions header.
         self.safe_addstr(start_y, padding_x, "Actions", curses.A_BOLD)
         action_area = 2
-        for idx, (label, enabled, _) in enumerate(actions):
+        for idx, (label, enabled, _, _) in enumerate(actions):
             attr = self.menu_option_attr(enabled)
             if self.focus == "actions" and idx == self.selected_action_index:
                 attr |= curses.A_REVERSE
             self.safe_addstr(start_y + 1 + idx, padding_x, label[:usable_width], attr)
+            action_area += 1
+        tutorial_lines = self._tutorial_lines(actions, usable_width)
+        for text in tutorial_lines:
+            if action_area >= height:
+                break
+            attr = self._tutorial_line_attr(text)
+            self.safe_addstr(start_y + action_area, padding_x, text[:usable_width], attr)
             action_area += 1
         if action_area < height:
             log_label = f"Log file: {LOG_FILE_DISPLAY}"
@@ -617,15 +773,22 @@ class ClusterUI:
             lines.append("Select 'Check all hosts' to gather current health.")
         else:
             lines.append("Cluster summary:")
-            for host in CLUSTER_HOSTS:
-                status = self.host_statuses[host].overall_status()
-                lines.append(f" - {host}: {status}")
+            for name, _ in CLUSTER_HOSTS:
+                status = self.host_statuses[name].overall_status()
+                lines.append(f" - {name}: {status}")
+            warnings = self._storage_quorum_warnings()
             if not self._hosts_needing_repair():
                 lines.append("")
-                lines.append("All hosts appear healthy.")
+                if warnings:
+                    lines.append("All hosts report OK, but storage quorum warnings are present (see below).")
+                else:
+                    lines.append("All hosts appear healthy.")
             else:
                 lines.append("")
                 lines.append("Some hosts need repair. Use the Repair All entry or fix individually.")
+            if warnings:
+                lines.append("")
+                lines.extend(warnings)
         lines.append("")
         lines.extend(["Recent messages:"] + (list(self.messages)[-3:] or ["(no recent messages)"]))
         for idx in range(min(len(lines), height)):
@@ -701,6 +864,147 @@ class ClusterUI:
             attr |= curses.A_DIM
         return attr
 
+    # ----------------------------------------------------- tutorial helpers ---
+    def _tutorial_context(self) -> Dict[str, str]:
+        host = self.selected_host or "<host>"
+        if self.selected_host:
+            host_target = get_host_target(self.selected_host)
+        else:
+            host_target = "<host>"
+        ssh_host = build_ssh_target(host_target)
+        if CLUSTER_HOSTS:
+            default_name, default_target = CLUSTER_HOSTS[0]
+        else:
+            default_name, default_target = ("<controller>", "<controller>")
+        controller_name, controller_target = get_primary_controller(default_name, default_target)
+        controller_ssh = build_ssh_target(controller_target)
+        host_names = [name for name, _ in CLUSTER_HOSTS]
+        host_loop = " ".join(shlex.quote(name) for name in host_names) or "<hosts>"
+        repair_targets = self._order_hosts_for_repair(self._hosts_needing_repair())
+        if not repair_targets:
+            repair_targets = host_names
+        repair_loop = " ".join(shlex.quote(name) for name in repair_targets) or "<hosts>"
+        return {
+            "host": host,
+            "target": host_target,
+            "ssh_host": ssh_host,
+            "controller": controller_name,
+            "controller_target": controller_target,
+            "controller_ssh_target": controller_ssh,
+            "host_loop": host_loop,
+            "repair_loop": repair_loop,
+            "host_list": ", ".join(host_names) or "<no hosts>",
+            "log_file": LOG_FILE_DISPLAY,
+            "ssh_user": SSH_USER or "root",
+            "min_nodes": str(MIN_GFS_NODES),
+        }
+
+    def _current_tutorial_key(self, actions: List[Action]) -> Optional[str]:
+        if not actions:
+            return None
+        index = min(max(self.selected_action_index, 0), len(actions) - 1)
+        return actions[index][3]
+
+    def _tutorial_commands(self, key: str, context: Dict[str, str]) -> List[str]:
+        ssh_host = context["ssh_host"]
+        controller_ssh = context["controller_ssh_target"]
+        if key == "check_host":
+            return [
+                tutorial_ssh_line(ssh_host, "echo ok"),
+                tutorial_ssh_line(ssh_host, "iscsiadm -m session"),
+                tutorial_ssh_line(ssh_host, "multipath -ll"),
+                tutorial_ssh_line(ssh_host, "mount | grep gfs2"),
+                tutorial_ssh_line(ssh_host, "systemctl is-active corosync"),
+                tutorial_ssh_line(controller_ssh, "pcs status"),
+            ]
+        if key == "check_all":
+            host_loop = context["host_loop"]
+            ssh_user = context["ssh_user"]
+            return [
+                f"for host in {host_loop}; do",
+                f"  ssh {ssh_user}@$host 'echo ok'",
+                f"  ssh {ssh_user}@$host 'iscsiadm -m session'",
+                f"  ssh {ssh_user}@$host 'multipath -ll'",
+                f"  ssh {ssh_user}@$host \"mount | grep gfs2\"",
+                f"  ssh {ssh_user}@$host 'systemctl is-active corosync'",
+                "done",
+                tutorial_ssh_line(controller_ssh, "pcs status"),
+            ]
+        if key == "repair_host":
+            return self._tutorial_commands_repair_host(context)
+        if key == "repair_all":
+            return self._tutorial_commands_repair_all(context)
+        return []
+
+    def _tutorial_commands_repair_host(self, context: Dict[str, str]) -> List[str]:
+        ssh_host = context["ssh_host"]
+        controller_ssh = context["controller_ssh_target"]
+        host = context["host"]
+        commands: List[str] = []
+        for _, command in HOST_REPAIR_STEPS:
+            commands.append(tutorial_ssh_line(ssh_host, command))
+        for _, template in CONTROLLER_NODE_REPAIR_STEPS:
+            formatted = template.format(host=host)
+            commands.append(tutorial_ssh_line(controller_ssh, formatted))
+        commands.append(tutorial_ssh_line(controller_ssh, "pcs status"))
+        return commands
+
+    def _tutorial_commands_repair_all(self, context: Dict[str, str]) -> List[str]:
+        ssh_user = context["ssh_user"]
+        controller_ssh = context["controller_ssh_target"]
+        repair_loop = context["repair_loop"]
+        commands: List[str] = [f"for host in {repair_loop}; do"]
+        for _, command in HOST_REPAIR_STEPS:
+            commands.append(f"  ssh {ssh_user}@$host {quote_for_shell(command)}")
+        commands.append("done")
+        commands.extend(
+            [
+                tutorial_ssh_line(controller_ssh, "pcs cluster start --all"),
+                tutorial_ssh_line(controller_ssh, "pcs resource cleanup"),
+                tutorial_ssh_line(controller_ssh, "pcs status"),
+            ]
+        )
+        return commands
+
+    def _tutorial_lines(self, actions: List[Action], width: int) -> List[str]:
+        key = self._current_tutorial_key(actions)
+        if not key:
+            return []
+        spec = TUTORIAL_CONTENT.get(key)
+        if not spec:
+            return []
+        context = self._tutorial_context()
+        lines: List[str] = [""]
+        title = spec.get("title")
+        if title:
+            lines.append(f"Tutorial: {title.format(**context)}")
+        reason = spec.get("reason")
+        if reason:
+            lines.extend(textwrap.wrap(f"Why: {reason.format(**context)}", width))
+        commands = self._tutorial_commands(key, context)
+        if commands:
+            lines.append("Commands to run:")
+            lines.extend(commands)
+        notes = spec.get("notes")
+        if notes:
+            lines.extend(textwrap.wrap(f"Notes: {notes.format(**context)}", width))
+        return lines
+
+    def _tutorial_line_attr(self, text: str) -> int:
+        attr = curses.A_NORMAL
+        stripped = text.strip()
+        if not stripped:
+            return attr
+        if stripped.startswith("Tutorial:"):
+            return curses.A_BOLD
+        if stripped.startswith("Commands"):
+            return self.menu_option_attr()
+        if stripped.startswith("Why:") or stripped.startswith("Notes:"):
+            return curses.A_DIM
+        if text.startswith("  "):
+            return curses.A_DIM
+        return attr
+
     # ------------------------------------------------------------ key input ---
     def handle_key(self, key: int) -> None:
         if key in (ord("q"), ord("Q")):
@@ -768,7 +1072,7 @@ class ClusterUI:
         return None
 
     def get_entries(self) -> List[Tuple[str, Optional[str]]]:
-        entries: List[Tuple[str, Optional[str]]] = [("host", host) for host in CLUSTER_HOSTS]
+        entries: List[Tuple[str, Optional[str]]] = [("host", name) for name, _ in CLUSTER_HOSTS]
         entries.append(("check_all", None))
         if self.check_all_completed:
             entries.append(("repair_all", None))
@@ -788,18 +1092,23 @@ class ClusterUI:
         entry_kind, _ = self.current_entry_info()
         actions: List[Action] = []
         if entry_kind == "host" and self.selected_host:
-            actions.append(("Check selected host", True, self.trigger_check_host))
-            actions.append(("Repair selected host", True, self.trigger_repair_host))
+            actions.append(("Check selected host", True, self.trigger_check_host, "check_host"))
+            actions.append(("Repair selected host", True, self.trigger_repair_host, "repair_host"))
         elif entry_kind == "check_all":
-            actions.append(("Run check across all hosts", True, self.trigger_check_all))
+            actions.append(("Run check across all hosts", True, self.trigger_check_all, "check_all"))
         elif entry_kind == "repair_all":
             pending = self._hosts_needing_repair()
             if pending:
                 actions.append(
-                    (f"Repair all unhealthy hosts ({len(pending)} pending)", True, self.trigger_repair_all)
+                    (
+                        f"Repair all unhealthy hosts ({len(pending)} pending)",
+                        True,
+                        self.trigger_repair_all,
+                        "repair_all",
+                    )
                 )
             else:
-                actions.append(("No repairs needed", False, None))
+                actions.append(("No repairs needed", False, None, None))
         if self.selected_action_index >= len(actions):
             self.selected_action_index = max(0, len(actions) - 1)
         if not actions and self.focus == "actions":
@@ -811,7 +1120,7 @@ class ClusterUI:
         if not actions:
             return
         action_index = max(0, min(action_index, len(actions) - 1))
-        label, enabled, handler = actions[action_index]
+        label, enabled, handler, _ = actions[action_index]
         if not enabled or handler is None:
             self.post_message(f"Action '{label}' is not available right now.")
             return
@@ -883,10 +1192,10 @@ class ClusterUI:
         self.queue.put(("message", f"Checks for {host} completed with {status.overall_status()}"))
 
     def _check_all_worker(self) -> None:
-        for host in CLUSTER_HOSTS:
-            status = perform_host_checks(host)
+        for name, _ in CLUSTER_HOSTS:
+            status = perform_host_checks(name)
             self.queue.put(("host_status", status))
-            self.queue.put(("message", f"Checks for {host} completed with {status.overall_status()}"))
+            self.queue.put(("message", f"Checks for {name} completed with {status.overall_status()}"))
         self.queue.put(("check_all_complete", None))
 
     def _repair_host_worker(self, host: str) -> None:
@@ -903,9 +1212,11 @@ class ClusterUI:
                 self.queue.put(("host_status", status))
                 self.queue.put(("message", f"Repair for {host} completed with {status.overall_status()}"))
             if hosts:
-                controller = CLUSTER_HOSTS[0]
-                summary, details = run_cluster_level_repairs(controller)
-                controller_status = updated_statuses.get(controller)
+                fallback_name = hosts[0]
+                fallback_target = get_host_target(fallback_name)
+                controller_name, controller_target = get_primary_controller(fallback_name, fallback_target)
+                summary, details = run_cluster_level_repairs(controller_target)
+                controller_status = updated_statuses.get(controller_name)
                 if controller_status:
                     controller_status.add_repair_entry(summary, details)
                     self.queue.put(("host_status", controller_status))
@@ -949,16 +1260,58 @@ class ClusterUI:
 
     def _hosts_needing_repair(self) -> List[str]:
         hosts: List[str] = []
-        for host in CLUSTER_HOSTS:
-            status = self.host_statuses.get(host)
+        for name, _ in CLUSTER_HOSTS:
+            status = self.host_statuses.get(name)
             if status and status.overall_status() != "OK":
-                hosts.append(host)
+                hosts.append(name)
         return hosts
+
+    def _storage_quorum_warnings(self) -> List[str]:
+        warnings: List[str] = []
+        if not self.host_statuses:
+            return warnings
+
+        hosts_with_good_storage: List[str] = []
+        hosts_without_iscsi: List[str] = []
+
+        for name, _ in CLUSTER_HOSTS:
+            host_status = self.host_statuses.get(name)
+            if not host_status:
+                hosts_without_iscsi.append(name)
+                continue
+            try:
+                iscsi = host_status.get_check("iSCSI")
+                gfs = host_status.get_check("GFS2")
+            except KeyError:
+                hosts_without_iscsi.append(name)
+                continue
+
+            iscsi_ok = iscsi.status == "OK"
+            gfs_ok = gfs.status == "OK"
+
+            if iscsi_ok and gfs_ok:
+                hosts_with_good_storage.append(name)
+
+            if not iscsi_ok:
+                hosts_without_iscsi.append(name)
+
+        if len(hosts_with_good_storage) < MIN_GFS_NODES:
+            warnings.append(
+                f"WARNING: Only {len(hosts_with_good_storage)} of {len(CLUSTER_HOSTS)} hosts "
+                f"have healthy iSCSI+GFS2; VME GFS2 requires at least {MIN_GFS_NODES} nodes."
+            )
+
+        if hosts_without_iscsi:
+            hostlist = ", ".join(hosts_without_iscsi)
+            warnings.append(f"Storage WARNING: No healthy iSCSI session detected on: {hostlist}")
+
+        return warnings
 
     def _order_hosts_for_repair(self, hosts: List[str]) -> List[str]:
         def priority(host: str) -> Tuple[int, int]:
             status = self.host_statuses.get(host)
-            base_index = CLUSTER_HOSTS.index(host) if host in CLUSTER_HOSTS else 0
+            idx = host_index(host)
+            base_index = idx if idx >= 0 else 0
             if not status:
                 return (3, base_index)
 
@@ -990,8 +1343,19 @@ class ClusterUI:
 
 
 def main() -> None:
+    global CLUSTER_HOSTS, HOST_TARGETS
+    cli_hosts = parse_cli_hosts(sys.argv[1:])
+    if cli_hosts:
+        CLUSTER_HOSTS = cli_hosts
+    else:
+        CLUSTER_HOSTS = list(DEFAULT_HOSTS)
+
     if not CLUSTER_HOSTS:
-        raise SystemExit("CLUSTER_HOSTS is empty. Please set your cluster hosts at the top of cluster_tui.py.")
+        print("Usage: python3 cluster_tui.py host1,10.10.10.10 host2,10.10.10.11 ...")
+        print("Or edit DEFAULT_HOSTS at the top of the script.")
+        sys.exit(1)
+
+    HOST_TARGETS = {name: target for name, target in CLUSTER_HOSTS}
 
     def runner(stdscr: Any) -> None:
         ui = ClusterUI(stdscr)
