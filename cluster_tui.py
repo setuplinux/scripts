@@ -778,6 +778,7 @@ class ClusterUI:
         padding_x = start_x + 1
         usable_width = max(1, width - 2)
         lines: List[str] = []
+        warnings: List[str] = []
         if not self.check_all_completed:
             lines.append("Cluster-wide checks have not been run yet.")
             lines.append("Select 'Check all hosts' to gather current health.")
@@ -787,15 +788,16 @@ class ClusterUI:
                 status = self.host_statuses[name].overall_status()
                 lines.append(f" - {name}: {status}")
             warnings = self._storage_quorum_warnings()
-        if not self._hosts_needing_repair():
-            lines.append("")
-            if warnings:
-                lines.append("All hosts report OK, but storage quorum warnings are present (see below).")
+        if self.check_all_completed:
+            if not self._hosts_needing_repair():
+                lines.append("")
+                if warnings:
+                    lines.append("All hosts report OK, but storage quorum warnings are present (see below).")
+                else:
+                    lines.append("All hosts appear healthy.")
             else:
-                lines.append("All hosts appear healthy.")
-        else:
-            lines.append("")
-            lines.append("Some hosts need repair. Use the Repair All entry or fix individually.")
+                lines.append("")
+                lines.append("Some hosts need repair. Use the Repair All entry or fix individually.")
         if warnings:
             lines.append("")
             lines.extend(warnings)
