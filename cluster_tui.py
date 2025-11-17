@@ -7,6 +7,7 @@ import curses
 import logging
 import queue
 import shlex
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -51,6 +52,12 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     logger.addHandler(handler)
     logger.propagate = False
+
+
+def set_ssh_password(password: Optional[str]) -> None:
+    """Store SSH password (empty string clears)."""
+    global SSH_PASSWORD
+    SSH_PASSWORD = password or ""
 
 
 def log_check_status(host: str, check_name: str, status: str, summary: str) -> None:
@@ -665,7 +672,7 @@ class ClusterUI:
         if footer_start >= start_y + height:
             return
         self.safe_hline(footer_start, start_x, width)
-        info_line = "Keys: ←/→ move focus • Enter selects • q quits"
+        info_line = "Keys: ←/→ move focus • Enter selects • p password • q quits"
         self.safe_addstr(min(footer_start + 1, start_y + height - 1), start_x + 1, info_line[: width - 2])
         busy_line = self.busy_status_text()
         if footer_start + 2 < start_y + height:
@@ -1023,6 +1030,71 @@ class ClusterUI:
             return curses.A_DIM
         return attr
 
+    def prompt_for_password(self) -> None:
+        prompt = "Enter SSH password (leave blank to use SSH keys only):"
+        result = self._prompt_hidden_input(prompt)
+        if result is None:
+            self.post_message("Password entry canceled.")
+            return
+        if result:
+            set_ssh_password(result)
+            if shutil.which("sshpass") is None:
+                self.post_message("Password stored, but sshpass is not installed locally.")
+            else:
+                self.post_message("SSH password stored for this session.")
+        else:
+            set_ssh_password(None)
+            self.post_message("SSH password cleared; falling back to SSH keys.")
+
+    def _prompt_hidden_input(self, prompt: str) -> Optional[str]:
+        height, width = self.stdscr.getmaxyx()
+        win_width = min(width - 4, max(40, len(prompt) + 4))
+        win_height = 5
+        start_y = max(0, (height - win_height) // 2)
+        start_x = max(0, (width - win_width) // 2)
+        win = curses.newwin(win_height, win_width, start_y, start_x)
+        win.keypad(True)
+        win.border()
+        prompt_text = prompt[: win_width - 2]
+        win.addstr(1, 1, prompt_text)
+        win.addstr(2, 1, "Enter=save  Esc=cancel")
+        input_y = 3
+        buffer: List[str] = []
+        max_len = win_width - 2
+        self._set_cursor_visible(True)
+        try:
+            while True:
+                mask = "*" * len(buffer)
+                visible = mask[-max_len:]
+                win.addstr(input_y, 1, visible.ljust(max_len))
+                win.move(input_y, 1 + len(visible))
+                win.refresh()
+                ch = win.getch()
+                if ch in (10, 13, curses.KEY_ENTER):
+                    return "".join(buffer)
+                if ch == 27:  # ESC
+                    return None
+                if ch in (curses.KEY_BACKSPACE, 127, 8):
+                    if buffer:
+                        buffer.pop()
+                    continue
+                if 0 <= ch <= 255:
+                    char = chr(ch)
+                    if char.isprintable() and len(buffer) < 512:
+                        buffer.append(char)
+        finally:
+            self._set_cursor_visible(False)
+            win.clear()
+            del win
+            self.stdscr.touchwin()
+            self.stdscr.refresh()
+
+    def _set_cursor_visible(self, visible: bool) -> None:
+        try:
+            curses.curs_set(1 if visible else 0)
+        except curses.error:
+            pass
+
     def _pcs_recovery_note_lines(self, width: int) -> List[str]:
         lines: List[str] = ["PCS recovery logic steps:"]
         for description, _ in CONTROLLER_NODE_REPAIR_STEPS:
@@ -1054,6 +1126,9 @@ class ClusterUI:
                 self.selected_action_index = min(self.selected_action_index, len(actions) - 1)
             else:
                 self.post_message("No actions available for this selection.")
+            return
+        if key in (ord("p"), ord("P")):
+            self.prompt_for_password()
             return
         if self.focus == "list":
             if key == curses.KEY_UP:
