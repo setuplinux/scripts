@@ -6,13 +6,37 @@ These helper scripts target Ubuntu 24.04 Server in my personal lab environment. 
 
 Curses-based cluster health dashboard and repair helper. It runs SSH, storage, and cluster-service checks for the hosts listed at the top of the file, lets you trigger repairs per host or across the entire cluster, records logs for each action, and automatically re-runs the check suite after repairs complete so you can verify status without leaving the UI.
 
-Usage:
+### Highlights
+- Header shows `Cluster TUI vYYYY.MM.DD | Log: /full/path/cluster_tui-YYYYMMDD.log` so you always know which build and log file are live. The title line is colorized on capable terminals with a spacer row under it for readability.
+- Split panes: the left menu lists hosts, datastore helpers, and global actions. The right pane shows recent actions plus a copy/paste-friendly tutorial block that spells out the exact SSH commands each action will run and why.
+- Logs for every check/repair are appended to the date-based log file next to the script and summarized inline for the selected host.
 
+### Quick start
 ```bash
+# Run against explicit host list.
+python3 cluster_tui.py e1,10.10.10.5 e2,10.10.10.6 e3,10.10.10.7
+
+# Or edit DEFAULT_HOSTS near the top of the script and run without arguments.
 python3 cluster_tui.py
+
+# Confirm the file you plan to commit/publish.
+ls -l cluster_tui.py
+realpath cluster_tui.py
 ```
 
-Requires passwordless SSH access as root plus the system utilities invoked in the check/repair steps (pcs, iscsiadm, systemctl, etc.).
+During the session you can:
+- Use ←/→ to switch focus, Tab or `[`/`]` to cycle top-level menus, and Enter to drill into actions.
+- Press `p` once to supply an SSH password (optional, requires `sshpass`). Key-based auth remains preferred for lab use.
+- Jump into the tutorial panel to copy the exact SSH/system commands that “Check host”, “Repair host”, or “Repair all” will execute. This doubles as documentation for your runbooks or GitHub issues.
+
+The script expects SSH access as root plus the utilities invoked in the check/repair steps (pcs, iscsiadm, multipath, systemctl, etc.). Host key prompts are suppressed to avoid curses glitches, so only run this in trusted lab networks.
+
+### GitHub / publishing checklist
+1. `python3 -m py_compile cluster_tui.py` to sanity check syntax.
+2. `git status -sb` to verify the files you want to publish (README, cluster_tui.py, logs ignored).
+3. `git add cluster_tui.py README.md` (and anything else you changed).
+4. `git commit -m "Describe the change"` followed by `git push origin main`.
+5. Update the repository description or release notes on GitHub to mirror the header version shown inside the TUI.
 
 ## upterm-2404-installer.sh
 
@@ -26,4 +50,3 @@ upterm --version
 ```
 
 After installation you can start secure read-only sessions (e.g., `upterm host --read-only -- bash`) or restrict access via `--authorized-key`/`--github-user`. Adjust options as needed for your lab.
-
