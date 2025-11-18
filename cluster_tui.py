@@ -105,6 +105,7 @@ SSH_COMMON_FLAGS = [
     "-o",
     "LogLevel=ERROR",
 ]
+SSH_BATCH_ONLY_FLAGS = ["-o", "BatchMode=yes"]
 
 
 def quote_for_shell(command: str) -> str:
@@ -279,10 +280,16 @@ def run_remote_command(host: str, command: str, timeout: int = 10) -> Tuple[int,
     """Execute COMMAND on HOST through the local ssh client."""
     ssh_target = build_ssh_target(host)
     if SSH_PASSWORD:
+        if shutil.which("sshpass") is None:
+            stderr = "sshpass is required for password auth but was not found (install it, e.g. sudo apt install sshpass)."
+            logger.error(stderr)
+            return 1, "", stderr
         base_cmd = ["sshpass", "-p", SSH_PASSWORD, "ssh"]
+        ssh_flags = list(SSH_COMMON_FLAGS)
     else:
         base_cmd = ["ssh"]
-    full_command = base_cmd + SSH_COMMON_FLAGS + [ssh_target, command]
+        ssh_flags = list(SSH_COMMON_FLAGS) + SSH_BATCH_ONLY_FLAGS
+    full_command = base_cmd + ssh_flags + [ssh_target, command]
     try:
         completed = subprocess.run(
             full_command,
