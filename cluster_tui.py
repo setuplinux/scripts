@@ -24,11 +24,8 @@ SSH_USER = "root"
 SSH_PASSWORD = ""  # leave empty for key auth; if non-empty, use sshpass
 # -------------------------------------------------------------------------
 
-DEFAULT_HOSTS: List[Tuple[str, str]] = [
-    # ("e1", "10.10.10.5"),
-    # ("e2", "10.10.10.6"),
-    # ("e3", "10.10.10.7"),
-]
+# Edit this single line with "name,ip name,ip ..." to change built-in hosts.
+DEFAULT_HOSTS_LINE = "e1,10.10.10.5 e2,10.10.10.6 e3,10.10.10.7"
 
 # CLUSTER_HOSTS populated at runtime
 CLUSTER_HOSTS: List[Tuple[str, str]] = []
@@ -1499,11 +1496,12 @@ def main() -> None:
     if cli_hosts:
         CLUSTER_HOSTS = cli_hosts
     else:
-        CLUSTER_HOSTS = list(DEFAULT_HOSTS)
+        default_hosts = parse_cli_hosts(DEFAULT_HOSTS_LINE.split()) if DEFAULT_HOSTS_LINE.strip() else []
+        CLUSTER_HOSTS = default_hosts
 
     if not CLUSTER_HOSTS:
         print("Usage: python3 cluster_tui.py host1,10.10.10.10 host2,10.10.10.11 ...")
-        print("Or edit DEFAULT_HOSTS at the top of the script.")
+        print("Or edit DEFAULT_HOSTS_LINE at the top of the script.")
         sys.exit(1)
 
     HOST_TARGETS = {name: target for name, target in CLUSTER_HOSTS}
