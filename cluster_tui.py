@@ -25,7 +25,7 @@ SSH_PASSWORD = ""  # leave empty for key auth; password mode requires sshpass (n
 # -------------------------------------------------------------------------
 
 # Edit this single line with "host host" or "name,ip" tokens to change built-in hosts.
-DEFAULT_HOSTS_LINE = "e1 e2 e3"
+DEFAULT_HOSTS_LINE = ""
 
 # CLUSTER_HOSTS populated at runtime
 CLUSTER_HOSTS: List[Tuple[str, str]] = []
