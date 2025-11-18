@@ -24,8 +24,8 @@ SSH_USER = "root"
 SSH_PASSWORD = ""  # leave empty for key auth; if non-empty, use sshpass
 # -------------------------------------------------------------------------
 
-# Edit this single line with "name,ip name,ip ..." to change built-in hosts.
-DEFAULT_HOSTS_LINE = "e1,10.10.10.5 e2,10.10.10.6 e3,10.10.10.7"
+# Edit this single line with "host host" or "name,ip" tokens to change built-in hosts.
+DEFAULT_HOSTS_LINE = "e1 e2 e3"
 
 # CLUSTER_HOSTS populated at runtime
 CLUSTER_HOSTS: List[Tuple[str, str]] = []

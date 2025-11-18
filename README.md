@@ -16,7 +16,8 @@ Curses-based cluster health dashboard and repair helper. It runs SSH, storage, a
 # Run against explicit host list.
 python3 cluster_tui.py e1,10.10.10.5 e2,10.10.10.6 e3,10.10.10.7
 
-# Or edit DEFAULT_HOSTS_LINE near the top of the script (single line "name,ip name,ip ...")
+# Or edit DEFAULT_HOSTS_LINE near the top of the script (single line of hostnames/IPs,
+# optionally as "name,ip" pairs if you care about display name vs target)
 # and run without arguments.
 python3 cluster_tui.py
 
