@@ -21,7 +21,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 # -------------------------------------------------------------------------
 # SSH configuration
 SSH_USER = "root"
-SSH_PASSWORD = ""  # leave empty for key auth; if non-empty, use sshpass
+SSH_PASSWORD = ""  # leave empty for key auth; password mode requires sshpass (not installed by default)
 # -------------------------------------------------------------------------
 
 # Edit this single line with "host host" or "name,ip" tokens to change built-in hosts.
@@ -51,15 +51,34 @@ if not logger.handlers:
     logger.propagate = False
 
 
-def set_ssh_password(password: Optional[str]) -> None:
-    """Store SSH password (empty string clears)."""
+def password_auth_supported() -> bool:
+    return shutil.which("sshpass") is not None
+
+
+def set_ssh_password(password: Optional[str]) -> bool:
+    """Store SSH password (empty string clears). Return True if accepted."""
     global SSH_PASSWORD
-    SSH_PASSWORD = password or ""
+    if password:
+        if not password_auth_supported():
+            logger.warning("Password auth requested but sshpass is not installed; ignoring password.")
+            SSH_PASSWORD = ""
+            return False
+        SSH_PASSWORD = password
+        return True
+    SSH_PASSWORD = ""
+    return True
 
 
 def log_check_status(host: str, check_name: str, status: str, summary: str) -> None:
-    """Write a structured log entry for every check outcome (including skipped/passive ones)."""
+    """Write a structured log entry for notable check outcomes."""
+    if status != "FAIL":
+        return
     logger.info("Check %s for %s -> %s | %s", check_name, host, status, summary)
+
+
+if SSH_PASSWORD and not password_auth_supported():
+    logger.warning("SSH_PASSWORD is set but sshpass is missing; falling back to key-based auth.")
+    SSH_PASSWORD = ""
 
 
 CHECK_NAMES = ["SSH", "iSCSI", "GFS2", "Corosync", "Pacemaker"]
@@ -665,6 +684,9 @@ class ClusterUI:
                 count = len(self._hosts_needing_repair())
                 entry_text = f">> Repair all hosts ({count} pending)" if count else ">> Repair all hosts"
                 attr |= self.menu_option_attr()
+            elif entry_kind == "exit":
+                entry_text = ">> Exit (q)"
+                attr |= self.menu_option_attr()
             else:
                 entry_text = "--"
             if entry_index == self.selected_entry_index:
@@ -1041,11 +1063,10 @@ class ClusterUI:
             self.post_message("Password entry canceled.")
             return
         if result:
-            set_ssh_password(result)
-            if shutil.which("sshpass") is None:
-                self.post_message("Password stored, but sshpass is not installed locally.")
-            else:
+            if set_ssh_password(result):
                 self.post_message("SSH password stored for this session.")
+            else:
+                self.post_message("sshpass is not installed; password auth is unavailable.")
         else:
             set_ssh_password(None)
             self.post_message("SSH password cleared; falling back to SSH keys.")
@@ -1187,6 +1208,7 @@ class ClusterUI:
         entries.append(("check_all", None))
         if self.check_all_completed:
             entries.append(("repair_all", None))
+        entries.append(("exit", None))
         return entries
 
     def current_entry_info(self) -> Tuple[str, Optional[str]]:
@@ -1220,6 +1242,8 @@ class ClusterUI:
                 )
             else:
                 actions.append(("No repairs needed", False, None, None))
+        elif entry_kind == "exit":
+            actions.append(("Exit program (q)", True, self.request_exit, None))
         if self.selected_action_index >= len(actions):
             self.selected_action_index = max(0, len(actions) - 1)
         if not actions and self.focus == "actions":

@@ -28,12 +28,14 @@ realpath cluster_tui.py
 # Optional: set defaults if you SSH as a non-root sudo user.
 sed -i 's/^SSH_USER = "root"/SSH_USER = "keith"/' cluster_tui.py
 # Either bake in SSH_PASSWORD = "..." or press p inside the TUI to enter it once.
-# Password flows require sshpass on the local machine (sudo apt install sshpass).
+# Password flows require sshpass on the local machine; if policy forbids extra packages,
+# stick to SSH keys (the UI will refuse to store a password and remind you).
 ```
 
 During the session you can:
 - Use ←/→ to switch focus, Tab or `[`/`]` to cycle top-level menus, and Enter to drill into actions.
-- Press `p` once to supply an SSH password (requires `sshpass`). Key-based auth remains preferred, and without a password the app runs SSH with `BatchMode=yes` so failures show up immediately instead of hanging the terminal.
+- Press `p` once to supply an SSH password (requires `sshpass`; otherwise the app stays in key-only mode and tells you why). Without a password the app runs SSH with `BatchMode=yes` so failures show up immediately instead of hanging the terminal.
+- There is an explicit “Exit (q)” entry in the left pane if you prefer navigating to a quit option instead of pressing `q`.
 - Jump into the tutorial panel to copy the exact SSH/system commands that “Check host”, “Repair host”, or “Repair all” will execute. This doubles as documentation for your runbooks or GitHub issues.
 
 The script expects SSH access as root plus the utilities invoked in the check/repair steps (pcs, iscsiadm, multipath, systemctl, etc.). Host key prompts are suppressed to avoid curses glitches, so only run this in trusted lab networks.
