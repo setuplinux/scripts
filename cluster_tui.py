@@ -10,12 +10,14 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 # -------------------------------------------------------------------------
@@ -34,13 +36,35 @@ HOST_TARGETS: Dict[str, str] = {}
 MENU_COLOR_PAIR = 5
 TITLE_COLOR_PAIR = 6
 MIN_GFS_NODES = 3
+CLOCK_DRIFT_THRESHOLD_SECS = 5
 
 APP_VERSION = "v2025.02.17"
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_NAME = SCRIPT_PATH.stem
-LOG_FILE_PATH = SCRIPT_PATH.with_name(f"{SCRIPT_NAME}-{datetime.now():%Y%m%d}.log")
+_DATE_STR = f"{datetime.now():%Y%m%d}"
+
+
+def resolve_log_path() -> Path:
+    """Pick a log file path that won't clobber prior runs."""
+    base = SCRIPT_PATH.with_name(f"{SCRIPT_NAME}-{_DATE_STR}.log")
+    if not base.exists():
+        return base
+    for idx in range(1, 100):
+        candidate = SCRIPT_PATH.with_name(f"{SCRIPT_NAME}-{_DATE_STR}-{idx:02d}.log")
+        if not candidate.exists():
+            return candidate
+    return base
+
+
+LOG_FILE_PATH = resolve_log_path()
 LOG_FILE_DISPLAY = str(LOG_FILE_PATH)
+SSH_KNOWN_HOSTS_PATH = Path(tempfile.gettempdir()) / "cluster_tui_known_hosts"
+try:
+    SSH_KNOWN_HOSTS_PATH.touch(exist_ok=True)
+    SSH_KNOWN_HOSTS_PATH.chmod(0o600)
+except Exception:
+    pass
 
 logger = logging.getLogger("cluster_tui")
 if not logger.handlers:
@@ -81,7 +105,7 @@ if SSH_PASSWORD and not password_auth_supported():
     SSH_PASSWORD = ""
 
 
-CHECK_NAMES = ["SSH", "iSCSI", "GFS2", "Corosync", "Pacemaker"]
+CHECK_NAMES = ["SSH", "Time", "iSCSI", "GFS2", "Corosync", "Pacemaker"]
 HOST_REPAIR_STEPS: List[Tuple[str, str]] = [
     ("Restart iSCSI daemon", "systemctl restart iscsid"),
     ("Restart iscsi service", "systemctl restart iscsi"),
@@ -108,6 +132,7 @@ CONTROLLER_NODE_REPAIR_STEPS: List[Tuple[str, str]] = [
 ]
 
 CONTROLLER_REPAIR_STEPS: List[Tuple[str, str]] = [
+    ("Cleanup fencing history", "pcs stonith cleanup --all"),
     ("Start cluster everywhere", "pcs cluster start --all"),
     ("Cleanup failed resources", "pcs resource cleanup"),
 ]
@@ -115,9 +140,11 @@ CONTROLLER_REPAIR_STEPS: List[Tuple[str, str]] = [
 Action = Tuple[str, bool, Optional[Callable[[], None]], Optional[str]]
 SSH_COMMON_FLAGS = [
     "-o",
-    "StrictHostKeyChecking=no",
+    "StrictHostKeyChecking=accept-new",
     "-o",
-    "UserKnownHostsFile=/dev/null",
+    f"UserKnownHostsFile={SSH_KNOWN_HOSTS_PATH}",
+    "-o",
+    "GlobalKnownHostsFile=/dev/null",
     "-o",
     "LogLevel=ERROR",
 ]
@@ -359,6 +386,64 @@ def check_ssh(host: str, target: str) -> CheckResult:
     return CheckResult(name="SSH", status=status, summary=summary, output=output)
 
 
+def _parse_bool_flag(lines: List[str], key: str) -> Optional[bool]:
+    for line in lines:
+        if not line.startswith(key):
+            continue
+        _, _, val = line.partition("=")
+        val = val.strip().lower()
+        if val in ("yes", "1", "true"):
+            return True
+        if val in ("no", "0", "false"):
+            return False
+    return None
+
+
+def check_time(host: str, target: str) -> CheckResult:
+    """Detect NTP sync and drift between local and remote clocks."""
+    command = (
+        "sh -c 'date +%s; "
+        "timedatectl show -p NTPSynchronized -p SystemClockSynchronized -p TimeUSec -p Timezone'"
+    )
+    exit_code, stdout, stderr = run_remote_command(target, command)
+    output = format_remote_output(target, command, exit_code, stdout, stderr)
+    if exit_code != 0 or not stdout.strip():
+        return CheckResult(
+            name="Time",
+            status="FAIL",
+            summary="Unable to read remote clock",
+            output=output,
+        )
+
+    lines = stdout.splitlines()
+    status = "OK"
+    summary_parts: List[str] = []
+    try:
+        remote_epoch = int(lines[0].strip())
+        local_epoch = int(time.time())
+        drift = abs(local_epoch - remote_epoch)
+        summary_parts.append(f"drift={drift}s")
+        if drift > CLOCK_DRIFT_THRESHOLD_SECS:
+            status = "FAIL"
+    except Exception:
+        summary_parts.append("drift=unknown")
+        status = "WARN"
+
+    ntp_synced = _parse_bool_flag(lines[1:], "NTPSynchronized")
+    clock_synced = _parse_bool_flag(lines[1:], "SystemClockSynchronized")
+    if ntp_synced is False or clock_synced is False:
+        status = "FAIL"
+        summary_parts.append("ntp_sync=false")
+    elif ntp_synced is True or clock_synced is True:
+        summary_parts.append("ntp_sync=true")
+    else:
+        summary_parts.append("ntp_sync=unknown")
+        status = "WARN"
+
+    summary = "; ".join(summary_parts)
+    return CheckResult(name="Time", status=status, summary=summary, output=output)
+
+
 def check_iscsi(host: str, target: str) -> CheckResult:
     commands = [
         "iscsiadm -m session",
@@ -428,7 +513,7 @@ def perform_host_checks(host: str, target: Optional[str] = None) -> HostStatus:
     ssh_result = check_ssh(host, resolved_target)
     status.set_check("SSH", ssh_result.status, ssh_result.summary, ssh_result.output)
     if ssh_result.status != "OK":
-        for later in ("iSCSI", "GFS2", "Corosync", "Pacemaker"):
+        for later in ("Time", "iSCSI", "GFS2", "Corosync", "Pacemaker"):
             status.set_check(
                 later,
                 "SKIPPED",
@@ -436,6 +521,9 @@ def perform_host_checks(host: str, target: Optional[str] = None) -> HostStatus:
                 "",
             )
         return status
+
+    time_result = check_time(host, resolved_target)
+    status.set_check("Time", time_result.status, time_result.summary, time_result.output)
 
     iscsi_result = check_iscsi(host, resolved_target)
     status.set_check("iSCSI", iscsi_result.status, iscsi_result.summary, iscsi_result.output)
@@ -505,9 +593,8 @@ def run_controller_node_repairs(host: str) -> Tuple[bool, str]:
     return run_step_sequence(controller_target, steps, timeout=90)
 
 
-def detect_gfs2_clone_resources(controller_target: str) -> List[str]:
+def detect_clone_resources(controller_target: str, prefixes: Tuple[str, ...]) -> List[str]:
     exit_code, stdout, stderr = run_remote_command(controller_target, "pcs status", timeout=60)
-    # run_remote_command already logs details; proceed even if pcs status fails.
     if exit_code != 0:
         return []
 
@@ -521,28 +608,60 @@ def detect_gfs2_clone_resources(controller_target: str) -> List[str]:
         remainder = remainder.strip()
         if not remainder:
             continue
-        clone_name = remainder.split()[0].strip("[]:,")
-        if not clone_name.lower().startswith("gfs"):
-            continue
-        clone_name = clone_name.rstrip(":")
-        if clone_name and clone_name not in seen:
-            clones.append(clone_name)
-            seen.add(clone_name)
+        clone_name = remainder.split()[0].strip("[]:,").rstrip(":")
+        lowered = clone_name.lower()
+        if any(lowered.startswith(prefix.lower()) for prefix in prefixes):
+            if clone_name and clone_name not in seen:
+                clones.append(clone_name)
+                seen.add(clone_name)
     return clones
 
 
+def detect_stonith_resources(controller_target: str) -> List[str]:
+    exit_code, stdout, stderr = run_remote_command(controller_target, "pcs status", timeout=60)
+    if exit_code != 0:
+        return []
+
+    resources: List[str] = []
+    seen = set()
+    for raw_line in stdout.splitlines():
+        if "(stonith:" not in raw_line:
+            continue
+        name = raw_line.strip().split()[0].strip()
+        if name and name not in seen:
+            resources.append(name)
+            seen.add(name)
+    return resources
+
+
 def repair_gfs2_resources(controller_target: str) -> Tuple[bool, str]:
-    clone_resources = detect_gfs2_clone_resources(controller_target)
-    if not clone_resources:
-        return True, "No GFS2 clone resources detected via pcs status"
+    stonith_resources = detect_stonith_resources(controller_target)
+    dlm_clones = detect_clone_resources(controller_target, ("dlm",))
+    gfs_clones = detect_clone_resources(controller_target, ("gfs",))
 
     steps: List[Tuple[str, str]] = []
-    for clone in clone_resources:
+    for res in stonith_resources:
+        steps.append((f"Enable fencing device {res}", f"pcs resource enable {res}"))
+        steps.append((f"Cleanup fencing device {res}", f"pcs resource cleanup {res}"))
+    for clone in dlm_clones:
+        steps.append((f"Enable DLM clone {clone}", f"pcs resource enable {clone}"))
+        steps.append((f"Cleanup DLM clone {clone}", f"pcs resource cleanup {clone}"))
+    for clone in gfs_clones:
         steps.append((f"Enable GFS2 clone {clone}", f"pcs resource enable {clone}"))
         steps.append((f"Cleanup GFS2 clone {clone}", f"pcs resource cleanup {clone}"))
 
+    if not steps:
+        return True, "No fencing/DLM/GFS2 resources detected via pcs status"
+
     success, step_details = run_step_sequence(controller_target, steps, timeout=90)
-    header = f"Detected GFS2 clone resources: {', '.join(clone_resources)}"
+    detected_parts = []
+    if stonith_resources:
+        detected_parts.append(f"Fencing: {', '.join(stonith_resources)}")
+    if dlm_clones:
+        detected_parts.append(f"DLM: {', '.join(dlm_clones)}")
+    if gfs_clones:
+        detected_parts.append(f"GFS2: {', '.join(gfs_clones)}")
+    header = "Detected resources: " + "; ".join(detected_parts)
     combined_details = "\n\n".join(part for part in (header, step_details) if part).strip()
     return success, combined_details
 
@@ -555,7 +674,7 @@ def run_cluster_level_repairs(controller_target: str) -> Tuple[str, str]:
 
     summary_parts = [
         "Cluster level repair completed" if controller_success else "Cluster level repair reported errors",
-        "GFS2 repair completed" if gfs_success else "GFS2 repair reported errors",
+        "Storage repair completed" if gfs_success else "Storage repair reported errors",
     ]
     details = "\n\n".join(part for part in (controller_details, gfs_details) if part).strip()
     return "; ".join(summary_parts), details
