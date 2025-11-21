@@ -48,6 +48,18 @@ The script expects SSH access as root plus the utilities invoked in the check/re
 4. `git commit -m "Describe the change"` followed by `git push origin main`.
 5. Update the repository description or release notes on GitHub to mirror the header version shown inside the TUI.
 
+## tmux-three-way.sh
+
+Launches a tmux session with three even horizontal panes, SSHs to each host, and enables synchronized input so the same commands run everywhere.
+
+Usage:
+```bash
+./tmux-three-way.sh e1 e2 e3 [session-name]
+```
+- Host arguments accept bare names or full `user@host`; when no user is given it prepends `root@`.
+- Default session name is `root-triplet`. Change it by passing a fourth argument.
+- Requires tmux and SSH access to the targets; handles window layout and attaches automatically.
+
 ## upterm-2404-installer.sh
 
 Installer for the latest Upterm release tuned for Ubuntu 24.04+. It detects `amd64` vs `arm64`, validates prerequisites (`curl` or `wget`, `tar`, `install`), downloads the current GitHub release tarball, extracts it to a temp dir, and installs `/usr/local/bin/upterm`.
