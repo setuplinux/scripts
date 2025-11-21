@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Three-pane tmux helper: opens even horizontal splits, SSHes to three hosts,
+# enables synchronized input, and attaches to the session.
+# Usage: ./tmux-three-way.sh <host1> <host2> <host3> [session-name]
+# - Hosts accept bare names or user@host; bare names default to root@<host>.
+# - Session name defaults to "root-triplet" if omitted.
+
 if [[ $# -lt 3 ]]; then
   echo "Usage: $0 <host1> <host2> <host3> [session-name]" >&2
   exit 1
