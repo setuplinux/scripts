@@ -2,6 +2,11 @@
 
 These helper scripts target Ubuntu 24.04 Server in my personal lab environment. They may help you too, but they come with **no warranty**—review the contents and use at your own risk.
 
+Quick index:
+- `tmux-three-way.sh` — open three even panes, SSH to the hosts you pass, and mirror input.
+- `cluster_tui.py` — curses TUI for cluster checks/repair with logging and tutorial sidebar.
+- `upterm-2404-installer.sh` — grab/install the latest Upterm release.
+
 ## cluster_tui.py
 
 Curses-based cluster health dashboard and repair helper. It runs SSH, storage, and cluster-service checks for the hosts listed at the top of the file, lets you trigger repairs per host or across the entire cluster, records logs for each action, and automatically re-runs the check suite after repairs complete so you can verify status without leaving the UI.
