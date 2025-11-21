@@ -46,13 +46,6 @@ During the session you can:
 
 The script expects SSH access as root plus the utilities invoked in the check/repair steps (pcs, iscsiadm, multipath, systemctl, etc.). Host key prompts are suppressed to avoid curses glitches, so only run this in trusted lab networks.
 
-### GitHub / publishing checklist
-1. `python3 -m py_compile cluster_tui.py` to sanity check syntax.
-2. `git status -sb` to verify the files you want to publish (README, cluster_tui.py, logs ignored).
-3. `git add cluster_tui.py README.md` (and anything else you changed).
-4. `git commit -m "Describe the change"` followed by `git push origin main`.
-5. Update the repository description or release notes on GitHub to mirror the header version shown inside the TUI.
-
 ## tmux-three-way.sh
 
 Launches a tmux session with three even horizontal panes, SSHs to each host, and enables synchronized input so the same commands run everywhere.
