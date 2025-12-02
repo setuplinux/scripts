@@ -5,7 +5,10 @@ These helper scripts target Ubuntu 24.04 Server in my personal lab environment. 
 Quick index:
 - `cluster_tui.py` — curses TUI for cluster checks/repair with logging and tutorial sidebar.
 - `tmux-three-way.sh` — open three even panes, SSH to the hosts you pass, and mirror input.
-- `upterm-2404-installer.sh` — grab/install the latest Upterm release.
+
+## Local development preferences
+
+`local_dev_preferences.json` pins the default palette, layout, logging format, and stdlib-only dependency posture to match `cluster_tui.py`. Use it as the baseline when building new TUIs or running existing ones in a dev-only setting so the look, logs, and coding assumptions stay consistent.
 
 ## cluster_tui.py
 
@@ -52,21 +55,8 @@ Launches a tmux session with three even horizontal panes, SSHs to each host, and
 
 Usage:
 ```bash
-./tmux-three-way.sh e1 e2 e3 [session-name]
+./tmux-three-way.sh e1 e2 e3
 ```
 - Host arguments accept bare names or full `user@host`; when no user is given it prepends `root@`.
-- Default session name is `root-triplet`. Change it by passing a fourth argument.
+- Session name is fixed to `three-way`; if it already exists you can attach to it or kill and recreate it.
 - Requires tmux and SSH access to the targets; handles window layout and attaches automatically.
-
-## upterm-2404-installer.sh
-
-Installer for the latest Upterm release tuned for Ubuntu 24.04+. It detects `amd64` vs `arm64`, validates prerequisites (`curl` or `wget`, `tar`, `install`), downloads the current GitHub release tarball, extracts it to a temp dir, and installs `/usr/local/bin/upterm`.
-
-Usage:
-
-```bash
-sh upterm-2404-installer.sh
-upterm --version
-```
-
-After installation you can start secure read-only sessions (e.g., `upterm host --read-only -- bash`) or restrict access via `--authorized-key`/`--github-user`. Adjust options as needed for your lab.
