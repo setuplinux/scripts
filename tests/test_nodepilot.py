@@ -1,16 +1,14 @@
-import http.client
+import ast
 import importlib.util
-import json
 import os
 import pathlib
 import pty
 import stat
-import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "nodepilot.py"
@@ -51,63 +49,35 @@ class CatalogTests(unittest.TestCase):
             helper.make_preview("hvmcli vm stop", "'unterminated")
 
 
-class WebSecurityTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.server, cls.token = helper.create_web_server("127.0.0.1", 0, token="test-token")
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-        cls.port = cls.server.server_address[1]
+class TuiOnlyCliTests(unittest.TestCase):
+    def test_default_invokes_tui(self):
+        with mock.patch.object(helper, "run_tui", return_value=17) as run_tui:
+            self.assertEqual(17, helper.main([]))
+        run_tui.assert_called_once_with()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        cls.thread.join(timeout=2)
+    def test_web_subcommand_is_rejected(self):
+        with self.assertRaises(SystemExit) as raised:
+            helper.build_parser().parse_args(["web"])
+        self.assertEqual(2, raised.exception.code)
 
-    def request(self, path, *, host=None, origin=None, method="GET"):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
-        headers = {"Host": host or f"127.0.0.1:{self.port}"}
-        if origin is not None:
-            headers["Origin"] = origin
-        conn.request(method, path, headers=headers)
-        response = conn.getresponse()
-        body = response.read()
-        headers_out = dict(response.getheaders())
-        conn.close()
-        return response.status, headers_out, body
+    def test_source_has_no_http_server_or_browser_imports(self):
+        tree = ast.parse(SCRIPT.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        self.assertNotIn("http.server", imported)
+        self.assertNotIn("webbrowser", imported)
+        self.assertFalse(hasattr(helper, "create_web_server"))
+        self.assertFalse(hasattr(helper, "run_web"))
 
-    def test_requires_random_session_token(self):
-        self.assertEqual(403, self.request("/")[0])
-        self.assertEqual(200, self.request("/?token=test-token")[0])
-        self.assertEqual(403, self.request("/?token=wrong")[0])
-
-    def test_rejects_untrusted_host_and_origin(self):
-        self.assertEqual(421, self.request("/?token=test-token", host="evil.example")[0])
-        self.assertEqual(403, self.request("/?token=test-token", origin="http://evil.example")[0])
-        allowed = f"http://127.0.0.1:{self.port}"
-        self.assertEqual(200, self.request("/?token=test-token", origin=allowed)[0])
-
-    def test_api_is_read_only_and_has_no_cors_wildcard(self):
-        status, headers, body = self.request("/api/catalog?token=test-token")
-        self.assertEqual(200, status)
-        self.assertEqual(101, len(json.loads(body)))
-        self.assertNotEqual("*", headers.get("Access-Control-Allow-Origin"))
-        self.assertNotIn("Access-Control-Allow-Origin", headers)
-        self.assertEqual(405, self.request("/execute?token=test-token", method="POST")[0])
-        self.assertEqual(404, self.request("/execute?token=test-token")[0])
-
-    def test_security_headers_are_present(self):
-        status, headers, _ = self.request("/?token=test-token")
-        self.assertEqual(200, status)
-        self.assertEqual("DENY", headers["X-Frame-Options"])
-        self.assertEqual("nosniff", headers["X-Content-Type-Options"])
-        self.assertEqual("no-referrer", headers["Referrer-Policy"])
-        self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
-
-    def test_server_refuses_non_loopback_bind(self):
-        with self.assertRaises(ValueError):
-            helper.create_web_server("0.0.0.0", 0)
+    def test_version_and_tui_header_are_nodepilot(self):
+        source = SCRIPT.read_text()
+        self.assertEqual("0.3.0", helper.VERSION)
+        self.assertIn('" NODEPILOT — READ-ONLY HELPER "', source)
+        self.assertNotIn("HPE VM ESSENTIALS — READ-ONLY HELPER", source)
 
 
 class LiveCommandTests(unittest.TestCase):
@@ -202,11 +172,11 @@ class MenuStateTests(unittest.TestCase):
 
 
 class PtySmokeTests(unittest.TestCase):
-    def test_real_curses_navigation_enter_escape_quit(self):
+    def test_default_real_curses_navigation_enter_escape_quit(self):
         pid, fd = pty.fork()
         if pid == 0:
             os.environ["TERM"] = "xterm-256color"
-            os.execv(sys.executable, [sys.executable, str(SCRIPT), "tui"])
+            os.execv(sys.executable, [sys.executable, str(SCRIPT)])
         try:
             time.sleep(0.25)
             os.write(fd, b"\r")

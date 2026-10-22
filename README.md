@@ -3,7 +3,7 @@
 These helper scripts come with **no warranty**—review the contents and use at your own risk. See each script's documentation for its requirements and supported scope.
 
 Quick index:
-- [`nodepilot.py`](nodepilot.py) — **NodePilot**, a single-file, standard-library host companion: read-only live TUI with system information and diagnostics, plus a browse-only web command catalog. [Documentation](NODEPILOT.md).
+- [`nodepilot.py`](nodepilot.py) — **NodePilot**, a single-file, standard-library host companion with a read-only live TUI for system information, diagnostics, and command help. [Documentation](NODEPILOT.md).
 - `tmux-three-way.sh` — open three even panes, SSH to the hosts you pass, and mirror input.
 
 ## NodePilot — quick start for POCs
@@ -22,7 +22,7 @@ This downloads the latest script and starts its terminal interface only if the d
 - **Run again:** `python3 nodepilot.py` — no further download needed.
 - **No GitHub access from the host?** [Download the script](https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py) on an approved computer, copy it to the host, then run the same Python command.
 
-Unofficial community tool, not an HPE-supported product. Use only with site approval. [Full NodePilot help, web mode and limitations](NODEPILOT.md).
+Unofficial community tool, not an HPE-supported product. Use only with site approval. [Full NodePilot help and limitations](NODEPILOT.md).
 
 ## tmux-three-way.sh
 

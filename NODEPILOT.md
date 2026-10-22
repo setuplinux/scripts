@@ -2,7 +2,7 @@
 
 A single-file host administration companion.
 
-An **unofficial, single-file helper** for HPE VM Essentials. The curses TUI provides curated live read-only views; the loopback web UI and text catalog remain browse/preview-only. This is not an HPE product and does not replace vendor documentation.
+An **unofficial, single-file helper** for HPE VM Essentials. The curses TUI provides curated live read-only views plus embedded command help and inert previews. This is not an HPE product and does not replace vendor documentation.
 
 ## Safety boundary
 
@@ -21,12 +21,10 @@ The live TUI can execute only the literal argv entries in `LIVE_COMMANDS`:
 
 There are no configure, update, deploy, VM power, host power, rescan, apply, or automatic watch actions. The runner uses `subprocess.Popen` with an argv list and `shell=False`, empty stdin, a restricted environment, a 15-second timeout, and a 256 KiB output ceiling. It kills a command at either bound. Terminal escape/control sequences are stripped before display, and common bearer tokens, API keys, passwords, secrets, and URL passwords are masked on a best-effort basis.
 
-The web server has **no execution endpoint**. Its command previews are inert text.
-
 ## Files
 
 - `nodepilot.py` — the one-file Python standard-library distributable.
-- `tests/test_nodepilot.py` — unit, HTTP integration, runner safety, and real PTY curses tests.
+- `tests/test_nodepilot.py` — catalog, CLI, runner safety, menu-state, and real PTY curses tests.
 
 The script embeds sanitized help for all 101 advertised non-help command/action paths from `hvmcli 1.0.0 (build 20260930)`. It does not need the source catalog at runtime.
 
@@ -35,8 +33,6 @@ The script embeds sanitized help for all 101 advertised non-help command/action 
 - Python 3.10 or newer; Python 3.13 tested.
 - A terminal with Python's standard `curses` module for the TUI.
 - `hvmcli` in `PATH` for live views. If it is absent, the TUI displays a readable error and remains usable as a help browser.
-- A modern browser for the optional loopback web UI.
-
 No third-party Python dependencies are used.
 
 ## Quick download and run
@@ -56,10 +52,6 @@ cd scripts
 
 # Live read-only curses UI (default)
 python3 nodepilot.py
-
-# Browse-only loopback web UI
-python3 nodepilot.py web
-python3 nodepilot.py web --open-browser
 
 # Browse-only text catalog
 python3 nodepilot.py list
@@ -82,16 +74,6 @@ python3 nodepilot.py preview "hvmcli vm stop" --args='--name "demo vm" --force'
 
 The **Command help browser** submenu is browse/preview-only. Its `p` key creates inert previews exactly as the text `preview` mode does.
 
-## Web safety controls
-
-- Always binds to IPv4 loopback (`127.0.0.1`), including when `localhost` is selected.
-- Requires a fresh random token on every HTML/API request.
-- Rejects untrusted `Host` and `Origin` values.
-- Supports only `GET` and `HEAD`, and only `/` and `/api/catalog`.
-- Has no execution route and emits no wildcard CORS header.
-- Sends restrictive CSP, framing, MIME-sniffing, referrer, same-origin resource, and no-store headers.
-- Inserts catalog content with DOM `textContent`, not `innerHTML`.
-
 ## Catalog provenance
 
 The embedded catalog was generated from successful installed-help results for the recorded build.
@@ -105,7 +87,7 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile nodepilot.py tests/test_nodepilot.py
 ```
 
-Tests cover catalog completeness and sanitization, browse-only web controls, allowlist contents, unknown-command rejection, missing `hvmcli`, process timeout/kill, output truncation, secret masking, menu state, output search/scroll, and real PTY Enter/Esc/q navigation.
+Tests cover catalog completeness and sanitization, TUI-only CLI behavior, allowlist contents, unknown-command rejection, missing `hvmcli`, process timeout/kill, output truncation, secret masking, menu state, output search/scroll, and real PTY Enter/Esc/q navigation.
 
 ## Limitations
 
