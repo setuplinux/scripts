@@ -3,6 +3,7 @@
 These helper scripts target Ubuntu 24.04 Server in my personal lab environment. They may help you too, but they come with **no warranty**—review the contents and use at your own risk.
 
 Quick index:
+- [`nodepilot.py`](nodepilot.py) — **NodePilot**, a single-file, standard-library host companion: read-only live TUI with system information and diagnostics, plus a browse-only web command catalog. [Documentation](NODEPILOT.md).
 - `cluster_tui.py` — curses TUI for cluster checks/repair with logging and tutorial sidebar.
 - `tmux-three-way.sh` — open three even panes, SSH to the hosts you pass, and mirror input.
 
