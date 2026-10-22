@@ -44,10 +44,10 @@ No third-party Python dependencies are used.
 On the VME host, in a writable directory:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py -o nodepilot.py && python3 nodepilot.py tui
+curl -fL https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py -o nodepilot.py && python3 nodepilot.py
 ```
 
-This replaces the local `nodepilot.py` and launches only after a successful download. Follow your site's code-review and execution policy. For an offline host, download on an approved computer and copy the single file over. No installer is required. Next time, run `python3 nodepilot.py tui`.
+This replaces the local `nodepilot.py` and launches only after a successful download. Follow your site's code-review and execution policy. For an offline host, download on an approved computer and copy the single file over. No installer is required. Next time, run `python3 nodepilot.py`.
 
 ## Run
 
@@ -56,7 +56,6 @@ cd scripts
 
 # Live read-only curses UI (default)
 python3 nodepilot.py
-python3 nodepilot.py tui
 
 # Browse-only loopback web UI
 python3 nodepilot.py web

@@ -11,7 +11,7 @@ Quick index:
 SSH into the **VME host** (not the Manager appliance) using your approved administrator account. In a writable directory, copy and paste:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py -o nodepilot.py && python3 nodepilot.py tui
+curl -fL https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py -o nodepilot.py && python3 nodepilot.py
 ```
 
 This downloads the latest script and starts its terminal interface only if the download succeeds. It replaces any `nodepilot.py` in the current directory; review downloaded code according to your site's policy before running it.
@@ -19,7 +19,7 @@ This downloads the latest script and starts its terminal interface only if the d
 - **No installer or pip packages.** Requires existing Python 3.10+, its `curses` module, and `hvmcli` for live information. Catalog tested against `hvmcli 1.0.0`, build `20260930`; other builds may differ.
 - **Read-only:** host/VM information, networking, storage, health and diagnostic logs. No configuration changes or repair actions.
 - **Keys:** arrows + Enter to navigate, Esc to go back, Page Up/Down to scroll, `/` to search output, `r` to refresh, `q` to quit.
-- **Run again:** `python3 nodepilot.py tui` — no further download needed.
+- **Run again:** `python3 nodepilot.py` — no further download needed.
 - **No GitHub access from the host?** [Download the script](https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py) on an approved computer, copy it to the host, then run the same Python command.
 
 Unofficial community tool, not an HPE-supported product. Use only with site approval. [Full NodePilot help, web mode and limitations](NODEPILOT.md).
