@@ -3,9 +3,11 @@ import importlib.util
 import os
 import pathlib
 import pty
+import select
 import stat
 import sys
 import tempfile
+import termios
 import time
 import unittest
 from unittest import mock
@@ -75,7 +77,7 @@ class TuiOnlyCliTests(unittest.TestCase):
 
     def test_version_and_tui_header_are_nodepilot(self):
         source = SCRIPT.read_text()
-        self.assertEqual("0.3.0", helper.VERSION)
+        self.assertEqual("0.3.1", helper.VERSION)
         self.assertIn('" NODEPILOT — READ-ONLY HELPER "', source)
         self.assertNotIn("HPE VM ESSENTIALS — READ-ONLY HELPER", source)
 
@@ -131,6 +133,19 @@ class LiveCommandTests(unittest.TestCase):
         self.assertEqual("timeout", result.status)
         self.assertLess(result.elapsed, 1.5)
 
+    def test_runner_timeout_kills_descendant_processes(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        marker = pathlib.Path(directory.name) / "descendant-survived"
+        child_code = f"import time; time.sleep(0.5); open({str(marker)!r}, 'w').write('alive')"
+        executable = self.make_executable(
+            f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', {child_code!r}])\ntime.sleep(2)\n"
+        )
+        result = helper.CommandRunner(timeout=0.15).run_sync("vm.list", executable=executable)
+        self.assertEqual("timeout", result.status)
+        time.sleep(0.6)
+        self.assertFalse(marker.exists())
+
     def test_runner_bounds_output(self):
         executable = self.make_executable("print('x' * 10000)\n")
         result = helper.CommandRunner(max_output=512).run_sync("vm.list", executable=executable)
@@ -149,6 +164,32 @@ class LiveCommandTests(unittest.TestCase):
         executable = self.make_executable("import sys\nsys.stdout.buffer.write(b'good\\x1b[2Jbad\\x07\\n')\n")
         result = helper.CommandRunner().run_sync("vm.list", executable=executable)
         self.assertEqual("goodbad\n", result.output)
+
+    def test_runner_isolates_child_from_callers_controlling_terminal(self):
+        executable = self.make_executable(
+            "import os, termios, time\n"
+            "time.sleep(0.2)\n"
+            "try:\n"
+            "    fd = os.open('/dev/tty', os.O_RDWR)\n"
+            "    attrs = termios.tcgetattr(fd)\n"
+            "    attrs[3] &= ~(termios.ICANON | termios.ECHO)\n"
+            "    termios.tcsetattr(fd, termios.TCSANOW, attrs)\n"
+            "    os.close(fd)\n"
+            "    print('changed controlling tty')\n"
+            "except OSError:\n"
+            "    print('no controlling tty')\n"
+        )
+        pid, fd = pty.fork()
+        if pid == 0:
+            before = termios.tcgetattr(sys.stdin.fileno())
+            result = helper.CommandRunner().run_sync("logs.node", executable=executable)
+            after = termios.tcgetattr(sys.stdin.fileno())
+            os._exit(0 if result.returncode == 0 and before == after else 1)
+        try:
+            _, status = os.waitpid(pid, 0)
+            self.assertEqual(0, os.waitstatus_to_exitcode(status))
+        finally:
+            os.close(fd)
 
 
 class MenuStateTests(unittest.TestCase):
@@ -172,6 +213,26 @@ class MenuStateTests(unittest.TestCase):
 
 
 class PtySmokeTests(unittest.TestCase):
+    def make_tty_changing_executable(self):
+        directory = tempfile.TemporaryDirectory()
+        path = pathlib.Path(directory.name) / "fake-hvmcli"
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, termios\n"
+            "try:\n"
+            "    fd = os.open('/dev/tty', os.O_RDWR)\n"
+            "    attrs = termios.tcgetattr(fd)\n"
+            "    attrs[3] |= termios.ICANON | termios.ECHO\n"
+            "    termios.tcsetattr(fd, termios.TCSANOW, attrs)\n"
+            "    os.close(fd)\n"
+            "except OSError:\n"
+            "    pass\n"
+            "print('fake node log complete')\n"
+        )
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        self.addCleanup(directory.cleanup)
+        return str(path)
+
     def test_default_real_curses_navigation_enter_escape_quit(self):
         pid, fd = pty.fork()
         if pid == 0:
@@ -192,6 +253,52 @@ class PtySmokeTests(unittest.TestCase):
             else:
                 os.kill(pid, 9)
                 self.fail("TUI did not exit after Enter, Esc, q navigation")
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def test_log_action_keeps_arrow_navigation_after_tty_changing_child_exits(self):
+        executable = self.make_tty_changing_executable()
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            original_run_sync = helper.CommandRunner.run_sync
+
+            def run_fake(runner, command_id, *, executable=None, resource=""):
+                return original_run_sync(runner, command_id, executable=executable_path, resource=resource)
+
+            executable_path = executable
+            helper.CommandRunner.run_sync = run_fake
+            helper.curses.wrapper(helper._curses_main)
+            os._exit(0)
+        transcript = bytearray()
+        try:
+            time.sleep(0.25)
+            os.write(fd, b"jjjjj\rj\r")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and b"fake node log complete" not in transcript:
+                readable, _, _ = select.select([fd], [], [], 0.1)
+                if readable:
+                    try:
+                        transcript.extend(os.read(fd, 65536))
+                    except OSError:
+                        break
+            self.assertIn(b"fake node log complete", transcript)
+
+            os.write(fd, b"\x1b[Aq")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    self.assertEqual(0, os.waitstatus_to_exitcode(status))
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+                self.fail("TUI stopped reading arrow/q keys after the log child exited")
         finally:
             try:
                 os.close(fd)

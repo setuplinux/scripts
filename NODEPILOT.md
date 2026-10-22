@@ -19,7 +19,7 @@ The live TUI can execute only the literal argv entries in `LIVE_COMMANDS`:
 - Health: one-shot `health check`
 - Diagnostics: non-live node/cluster/Morpheus-agent logs and the latest 100 warning-or-higher node events
 
-There are no configure, update, deploy, VM power, host power, rescan, apply, or automatic watch actions. The runner uses `subprocess.Popen` with an argv list and `shell=False`, empty stdin, a restricted environment, a 15-second timeout, and a 256 KiB output ceiling. It kills a command at either bound. Terminal escape/control sequences are stripped before display, and common bearer tokens, API keys, passwords, secrets, and URL passwords are masked on a best-effort basis.
+There are no configure, update, deploy, VM power, host power, rescan, apply, or automatic watch actions. The runner uses `subprocess.Popen` with an argv list and `shell=False`, empty stdin, a restricted environment, a new child session, a 15-second timeout, and a 256 KiB output ceiling. Session isolation prevents a child from changing the TUI's controlling-terminal mode. It kills the isolated process group at either bound so descendants cannot outlive a timed-out or truncated command. Terminal escape/control sequences are stripped before display, and common bearer tokens, API keys, passwords, secrets, and URL passwords are masked on a best-effort basis.
 
 ## Files
 
@@ -87,7 +87,7 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile nodepilot.py tests/test_nodepilot.py
 ```
 
-Tests cover catalog completeness and sanitization, TUI-only CLI behavior, allowlist contents, unknown-command rejection, missing `hvmcli`, process timeout/kill, output truncation, secret masking, menu state, output search/scroll, and real PTY Enter/Esc/q navigation.
+Tests cover catalog completeness and sanitization, TUI-only CLI behavior, allowlist contents, unknown-command rejection, missing `hvmcli`, process-group timeout/kill, output truncation, controlling-terminal isolation, secret masking, menu state, output search/scroll, and real PTY log-action/arrow-key navigation.
 
 ## Limitations
 
