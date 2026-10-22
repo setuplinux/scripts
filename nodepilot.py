@@ -537,7 +537,7 @@ def _curses_main(stdscr) -> None:
         header_attr = curses.color_pair(2) | curses.A_BOLD if curses.has_colors() else curses.A_BOLD
         _safe_add(stdscr, 1, 2, " HPE VM ESSENTIALS — READ-ONLY HELPER ", width - 4, header_attr)
         _safe_add(stdscr, 2, 2, state.breadcrumb, width - 4, curses.A_BOLD)
-        _safe_add(stdscr, 3, 2, "Safety: fixed allowlist, shell=False, 15s timeout, 256 KiB output cap", width - 4)
+        # Keep row 3 blank as breathing room between breadcrumb and pane headings.
         split = min(39, max(27, width // 3)); body_top = 5; body_bottom = height - 3
         for row in range(body_top, body_bottom + 1): _safe_add(stdscr, row, split, "|", 1)
         _safe_add(stdscr, 4, 2, " MENU ", split - 3, curses.A_BOLD)
