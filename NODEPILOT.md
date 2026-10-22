@@ -39,6 +39,16 @@ The script embeds sanitized help for all 101 advertised non-help command/action 
 
 No third-party Python dependencies are used.
 
+## Quick download and run
+
+On the VME host, in a writable directory:
+
+```bash
+curl -fL https://raw.githubusercontent.com/setuplinux/scripts/main/nodepilot.py -o nodepilot.py && python3 nodepilot.py tui
+```
+
+This replaces the local `nodepilot.py` and launches only after a successful download. Follow your site's code-review and execution policy. For an offline host, download on an approved computer and copy the single file over. No installer is required. Next time, run `python3 nodepilot.py tui`.
+
 ## Run
 
 ```bash
